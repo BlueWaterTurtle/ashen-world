@@ -127,6 +127,11 @@ impl App {
         );
         let seed = self.world.seed;
         self.camera.target.y = height_at(seed, self.camera.target.x, self.camera.target.z);
+        self.world.set_focus_points(vec![core_sim::WorldPos::new(
+            self.camera.target.x,
+            0.0,
+            self.camera.target.z,
+        )]);
 
         if let Some(r) = &mut self.renderer {
             self.camera.aspect = r.aspect();
@@ -136,6 +141,9 @@ impl App {
             let view_proj = self.camera.view_proj();
             self.agent_instances.clear();
             for e in self.world.entities() {
+                if !self.world.is_renderable(e) {
+                    continue;
+                }
                 let position = self.world.position(e);
                 if agent_in_frustum(position, view_proj) {
                     let c = if self.world.selected_character() == Some(e) {
@@ -439,5 +447,59 @@ mod tests {
             WorldPos::new(target.x + 100_000.0, target.y, target.z),
             view_proj
         ));
+    }
+
+    #[test]
+    fn rendering_includes_reduced_and_excludes_dormant_and_culled_agents() {
+        use core_sim::{Entity, SimulationTier};
+
+        let camera = Camera::default();
+        let view_proj = camera.view_proj();
+        let target = camera.target;
+
+        let mut world = World::generate(&WorldConfig {
+            seed: 123,
+            agent_count: 4,
+            ..Default::default()
+        });
+
+        let e_active = Entity(0);
+        let e_reduced = Entity(1);
+        let e_dormant = Entity(2);
+        let e_culled = Entity(3);
+
+        world.set_tier(e_active, SimulationTier::Active);
+        world.set_position(e_active, WorldPos::new(target.x, target.y, target.z));
+
+        // Reduced tier: simulated less often, but STILL rendered when visible
+        world.set_tier(e_reduced, SimulationTier::Reduced);
+        world.set_position(e_reduced, WorldPos::new(target.x + 1.0, target.y, target.z));
+
+        // Dormant tier: not rendered until promoted back to higher tier
+        world.set_tier(e_dormant, SimulationTier::Dormant);
+        world.set_position(e_dormant, WorldPos::new(target.x + 2.0, target.y, target.z));
+
+        // Active tier, but outside camera frustum
+        world.set_tier(e_culled, SimulationTier::Active);
+        world.set_position(
+            e_culled,
+            WorldPos::new(target.x + 50_000.0, target.y, target.z),
+        );
+
+        let mut rendered_entities = Vec::new();
+        for e in world.entities() {
+            if !world.is_renderable(e) {
+                continue;
+            }
+            let pos = world.position(e);
+            if agent_in_frustum(pos, view_proj) {
+                rendered_entities.push(e);
+            }
+        }
+
+        assert!(rendered_entities.contains(&e_active));
+        assert!(rendered_entities.contains(&e_reduced));
+        assert!(!rendered_entities.contains(&e_dormant));
+        assert!(!rendered_entities.contains(&e_culled));
     }
 }
