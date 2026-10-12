@@ -1,0 +1,4 @@
+[
+  { "id": "wanderer", "name": "Wanderer", "faction": "wanderers", "max_health": 100.0, "move_speed": 3.0 },
+  { "id": "raider", "name": "Raider", "faction": "raiders", "max_health": 120.0, "move_speed": 3.5 }
+]

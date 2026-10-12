@@ -1,0 +1,11 @@
+[package]
+name = "game_client"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+core_sim = { path = "../core_sim" }
+content = { path = "../content" }
+winit = "0.30"
+softbuffer = "0.4"
