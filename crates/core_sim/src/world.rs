@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::behavior::Behavior;
 use crate::chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
-use crate::path::{find_path, Cell};
+use crate::path::{Cell, Pathfinder};
 use crate::rng::Rng;
 use crate::terrain::{height_at, WalkabilityCache};
 
@@ -121,8 +121,12 @@ pub struct World {
     pub max_path_requests_per_tick: usize,
     rng: Rng,
     walkability_cache: WalkabilityCache,
-    /// Round-robin cursor so every idle agent eventually gets a path request.
-    wander_cursor: usize,
+    pathfinder: Pathfinder,
+    /// FIFO of agents that may be ready for a wander request. Agents are enqueued when
+    /// they become idle, so per-tick scheduling cost scales with requests served.
+    wander_queue: VecDeque<u32>,
+    /// Whether each agent is currently in `wander_queue`.
+    wander_queued: Vec<bool>,
     /// The currently selected player character, if any.
     pub selected_player_character: Option<Entity>,
 }
@@ -131,6 +135,8 @@ pub struct World {
 pub const PATH_BUDGET: usize = 20_000;
 /// Pause ticks applied to an agent when a wander path request fails.
 pub const WANDER_BACKOFF_TICKS: u32 = 15;
+/// Deterministic attempts to pick a walkable wander goal before giving up.
+pub const WANDER_GOAL_RETRIES: usize = 8;
 
 impl World {
     /// Deterministically generate a world from the config.
@@ -181,6 +187,7 @@ impl World {
         } else {
             None
         };
+        let wander_queue: VecDeque<u32> = (0..config.agent_count as u32).collect();
         Self {
             seed: config.seed,
             tick: 0,
@@ -190,7 +197,9 @@ impl World {
             max_path_requests_per_tick: config.max_path_requests_per_tick,
             rng,
             walkability_cache,
-            wander_cursor: 0,
+            pathfinder: Pathfinder::new(),
+            wander_queue,
+            wander_queued: vec![true; config.agent_count],
             selected_player_character,
         }
     }
@@ -251,6 +260,18 @@ impl World {
         if let Ok(mut p) = self.ecs.get::<&mut Pause>(self.ids[e.0 as usize]) {
             p.0 = ticks;
         }
+        if ticks == 0 {
+            self.enqueue_wander(e.0);
+        }
+    }
+
+    fn enqueue_wander(&mut self, i: u32) {
+        if let Some(q) = self.wander_queued.get_mut(i as usize) {
+            if !*q {
+                *q = true;
+                self.wander_queue.push_back(i);
+            }
+        }
     }
 
     /// Number of agents currently following a path.
@@ -271,7 +292,10 @@ impl World {
         let goal = (goal.x.floor() as i32, goal.z.floor() as i32);
         let seed = self.seed;
         let cache = &mut self.walkability_cache;
-        match find_path(start, goal, PATH_BUDGET, |c| cache.is_walkable(seed, c)) {
+        match self
+            .pathfinder
+            .find_path(start, goal, PATH_BUDGET, |c| cache.is_walkable(seed, c))
+        {
             Some(path) => {
                 if let Ok(mut c) = self.ecs.get::<&mut Path>(id) {
                     c.0 = Some(path.into_iter().skip(1).collect());
@@ -289,18 +313,18 @@ impl World {
         self.tick += 1;
     }
 
-    /// Serve a bounded number of path requests for idle agents, round-robin.
+    /// Serve a bounded number of path requests for idle agents, in queue order.
     fn assign_wander_goals(&mut self) {
-        let n = self.ids.len();
         let mut requests = 0;
-        for _ in 0..n {
-            if requests >= self.max_path_requests_per_tick {
+        while requests < self.max_path_requests_per_tick {
+            let Some(i) = self.wander_queue.pop_front() else {
                 break;
-            }
-            let i = self.wander_cursor;
-            self.wander_cursor = (self.wander_cursor + 1) % n;
-            let e = Entity(i as u32);
+            };
+            self.wander_queued[i as usize] = false;
+            let e = Entity(i);
             let r = self.behaviors[self.behavior_of(e)].wander_range;
+            // Agents that aren't ready are dropped; they re-enter the queue when they
+            // become idle again (path finished, pause expired, control released).
             if self.is_player_controlled(e)
                 || self.is_navigating(e)
                 || self.pause_of(e) > 0
@@ -309,31 +333,60 @@ impl World {
                 continue;
             }
             requests += 1;
-            let span = 2 * r as u64 + 1;
-            let dx = (self.rng.next_u64() % span) as i32 - r;
-            let dz = (self.rng.next_u64() % span) as i32 - r;
             let p = self.position(e);
-            if !self.navigate_to(e, WorldPos::new(p.x + dx as f32, 0.0, p.z + dz as f32)) {
+            let goal = self.pick_wander_goal(p, r);
+            if !self.navigate_to(e, goal) {
                 self.set_pause(e, WANDER_BACKOFF_TICKS);
             }
         }
+    }
+
+    /// Pick a random goal within `r` cells of `p`, retrying a bounded number of times
+    /// to land on a walkable cell. Falls back to the last candidate.
+    fn pick_wander_goal(&mut self, p: WorldPos, r: i32) -> WorldPos {
+        let span = 2 * r as u64 + 1;
+        let mut goal = WorldPos::new(p.x, 0.0, p.z);
+        for _ in 0..WANDER_GOAL_RETRIES {
+            let dx = (self.rng.next_u64() % span) as i32 - r;
+            let dz = (self.rng.next_u64() % span) as i32 - r;
+            goal = WorldPos::new(p.x + dx as f32, 0.0, p.z + dz as f32);
+            let cell = (goal.x.floor() as i32, goal.z.floor() as i32);
+            if self.walkability_cache.is_walkable(self.seed, cell) {
+                break;
+            }
+        }
+        goal
     }
 
     fn follow_paths(&mut self) {
         let seed = self.seed;
         let behaviors = &self.behaviors;
         let rng = &mut self.rng;
-        for (_, (pos, vel, path, bid, pause)) in self.ecs.query_mut::<(
-            &mut Position,
-            &mut Velocity,
-            &mut Path,
-            &BehaviorId,
-            &mut Pause,
-        )>() {
+        let queue = &mut self.wander_queue;
+        let queued = &mut self.wander_queued;
+        // All agents share one archetype, so iteration order is spawn order.
+        for (i, (_, (pos, vel, path, bid, pause))) in self
+            .ecs
+            .query_mut::<(
+                &mut Position,
+                &mut Velocity,
+                &mut Path,
+                &BehaviorId,
+                &mut Pause,
+            )>()
+            .into_iter()
+            .enumerate()
+        {
+            let was_paused = pause.0 > 0;
             pause.0 = pause.0.saturating_sub(1);
+            let mut enqueue = was_paused && pause.0 == 0 && path.0.is_none();
             let b = &behaviors[bid.0];
             let step_len = b.speed * TICK_DT;
             let Some(wp) = path.0.as_mut() else {
+                if enqueue && !queued[i] {
+                    queued[i] = true;
+                    queue.push_back(i as u32);
+                }
                 continue;
             };
             let Some(&(cx, cz)) = wp.front() else {
@@ -346,6 +399,13 @@ impl World {
                     0
                 };
                 pause.0 = min + extra;
+                if pause.0 == 0 {
+                    enqueue = true;
+                }
+                if enqueue && !queued[i] {
+                    queued[i] = true;
+                    queue.push_back(i as u32);
+                }
                 continue;
             };
             let (tx, tz) = (cx as f32 + 0.5, cz as f32 + 0.5);
@@ -387,6 +447,9 @@ impl World {
                 .get::<&mut PlayerControlled>(self.ids[e.0 as usize])
             {
                 c.0 = controlled;
+            }
+            if !controlled {
+                self.enqueue_wander(e.0);
             }
         }
     }
@@ -819,6 +882,49 @@ mod tests {
         );
         for e in failed_agents {
             assert_eq!(w.pause_of(e), WANDER_BACKOFF_TICKS - 1);
+        }
+    }
+
+    #[test]
+    fn wander_goals_are_walkable() {
+        let mut w = World::generate(&cfg(42));
+        let (mut walkable, total) = (0, 500);
+        for i in 0..total {
+            let p = w.position(Entity(i % 50));
+            let g = w.pick_wander_goal(p, 12);
+            walkable +=
+                crate::terrain::is_walkable(42, (g.x.floor() as i32, g.z.floor() as i32)) as usize;
+        }
+        assert!(walkable * 100 >= total as usize * 95, "{walkable}/{total}");
+    }
+
+    #[test]
+    fn large_world_is_deterministic() {
+        let c = WorldConfig {
+            seed: 77,
+            agent_count: 2_000,
+            ..Default::default()
+        };
+        let (mut a, mut b) = (World::generate(&c), World::generate(&c));
+        a.run_ticks(300);
+        b.run_ticks(300);
+        assert_eq!(snapshot(&a), snapshot(&b));
+        assert!(a.navigating_count() > 0);
+    }
+
+    /// Run with `cargo test -p core_sim --release -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_step_timing() {
+        for n in [500, 2_000, 10_000] {
+            let mut w = World::generate(&WorldConfig {
+                seed: 1,
+                agent_count: n,
+                ..Default::default()
+            });
+            let t = std::time::Instant::now();
+            w.run_ticks(300);
+            println!("{n} agents: {:?} per tick", t.elapsed() / 300);
         }
     }
 

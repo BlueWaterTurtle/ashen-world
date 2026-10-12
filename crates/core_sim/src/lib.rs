@@ -15,7 +15,7 @@ pub use building::{
 };
 pub use chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
 pub use clock::GameClock;
-pub use path::{find_path, Cell};
+pub use path::{find_path, Cell, Pathfinder};
 pub use rng::Rng;
 pub use terrain::{height_at, is_walkable, ChunkStreamer, ChunkTerrain};
 pub use world::{

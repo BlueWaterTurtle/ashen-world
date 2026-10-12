@@ -1,5 +1,5 @@
 use crate::chunk::{ChunkCoord, CHUNK_SIZE};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 const WALKABILITY_CACHE_CHUNKS: usize = 64;
 
@@ -55,27 +55,46 @@ pub fn is_walkable(seed: u64, cell: (i32, i32)) -> bool {
         .all(|&(dx, dz)| (h((cell.0 + dx, cell.1 + dz)) - here).abs() <= MAX_STEP_HEIGHT)
 }
 
+const CHUNK_CELLS: usize = CHUNK_SIZE as usize;
+const BITSET_WORDS: usize = CHUNK_CELLS * CHUNK_CELLS / 64;
+
 /// Bounded cache of walkability for cells visited by pathfinding.
+///
+/// Each chunk is stored as a bitset in a fixed slot array (FIFO replacement), and
+/// the most recently used slot is remembered so consecutive lookups in the same
+/// chunk (the common case during A*) skip hashing entirely.
 #[derive(Debug, Default)]
 pub(crate) struct WalkabilityCache {
-    chunks: HashMap<ChunkCoord, Vec<bool>>,
-    insertion_order: VecDeque<ChunkCoord>,
+    slots: Vec<(ChunkCoord, Box<[u64; BITSET_WORDS]>)>,
+    index: HashMap<ChunkCoord, usize>,
+    next_evict: usize,
+    last: Option<(ChunkCoord, usize)>,
 }
 
 impl WalkabilityCache {
+    #[inline]
     pub(crate) fn is_walkable(&mut self, seed: u64, cell: (i32, i32)) -> bool {
-        let size = CHUNK_SIZE as i32;
+        let size = CHUNK_CELLS as i32;
         let coord = ChunkCoord::new(cell.0.div_euclid(size), cell.1.div_euclid(size));
-        if !self.chunks.contains_key(&coord) {
-            self.cache_chunk(seed, coord);
-        }
+        let slot = match self.last {
+            Some((c, slot)) if c == coord => slot,
+            _ => {
+                let slot = match self.index.get(&coord) {
+                    Some(&slot) => slot,
+                    None => self.cache_chunk(seed, coord),
+                };
+                self.last = Some((coord, slot));
+                slot
+            }
+        };
         let x = cell.0.rem_euclid(size) as usize;
         let z = cell.1.rem_euclid(size) as usize;
-        self.chunks[&coord][z * size as usize + x]
+        let bit = z * CHUNK_CELLS + x;
+        self.slots[slot].1[bit / 64] >> (bit % 64) & 1 != 0
     }
 
-    fn cache_chunk(&mut self, seed: u64, coord: ChunkCoord) {
-        let size = CHUNK_SIZE as usize;
+    fn cache_chunk(&mut self, seed: u64, coord: ChunkCoord) -> usize {
+        let size = CHUNK_CELLS;
         let samples = size + 2;
         let (origin_x, origin_z) = coord.origin();
         let mut heights = vec![0.0; samples * samples];
@@ -86,11 +105,11 @@ impl WalkabilityCache {
             }
         }
 
-        let mut walkable = vec![false; size * size];
+        let mut bits = Box::new([0u64; BITSET_WORDS]);
         for z in 0..size {
             for x in 0..size {
                 let center = heights[(z + 1) * samples + x + 1];
-                walkable[z * size + x] = [
+                let walkable = [
                     heights[(z + 1) * samples + x + 2],
                     heights[(z + 1) * samples + x],
                     heights[(z + 2) * samples + x + 1],
@@ -98,16 +117,26 @@ impl WalkabilityCache {
                 ]
                 .iter()
                 .all(|h| (*h - center).abs() <= MAX_STEP_HEIGHT);
+                if walkable {
+                    let bit = z * size + x;
+                    bits[bit / 64] |= 1 << (bit % 64);
+                }
             }
         }
 
-        if self.chunks.len() == WALKABILITY_CACHE_CHUNKS {
-            if let Some(oldest) = self.insertion_order.pop_front() {
-                self.chunks.remove(&oldest);
-            }
-        }
-        self.chunks.insert(coord, walkable);
-        self.insertion_order.push_back(coord);
+        let slot = if self.slots.len() < WALKABILITY_CACHE_CHUNKS {
+            self.slots.push((coord, bits));
+            self.slots.len() - 1
+        } else {
+            let slot = self.next_evict;
+            self.next_evict = (slot + 1) % WALKABILITY_CACHE_CHUNKS;
+            let old = std::mem::replace(&mut self.slots[slot], (coord, bits)).0;
+            self.index.remove(&old);
+            slot
+        };
+        self.index.insert(coord, slot);
+        self.last = Some((coord, slot));
+        slot
     }
 }
 
@@ -214,7 +243,7 @@ mod tests {
                 );
             }
         }
-        assert!(cache.chunks.len() <= WALKABILITY_CACHE_CHUNKS);
+        assert!(cache.index.len() <= WALKABILITY_CACHE_CHUNKS);
     }
 
     #[test]
