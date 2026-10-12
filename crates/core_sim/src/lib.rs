@@ -4,6 +4,7 @@ pub mod behavior;
 pub mod building;
 pub mod chunk;
 pub mod clock;
+pub mod npc;
 pub mod path;
 pub mod rng;
 pub mod terrain;
@@ -15,6 +16,10 @@ pub use building::{
 };
 pub use chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
 pub use clock::GameClock;
+pub use npc::{
+    DespawnError, EntityKind, Inventory, ItemStack, LodConfig, NavGoal, NpcId, PersistentNpcRecord,
+    SimTier, Skills,
+};
 pub use path::{find_path, Cell, Pathfinder};
 pub use rng::Rng;
 pub use terrain::{height_at, is_walkable, ChunkStreamer, ChunkTerrain};
