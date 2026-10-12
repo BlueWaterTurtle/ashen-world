@@ -1,6 +1,7 @@
 //! Headless, deterministic simulation core. No rendering dependencies.
 
 pub mod behavior;
+pub mod building;
 pub mod chunk;
 pub mod clock;
 pub mod path;
@@ -9,6 +10,9 @@ pub mod terrain;
 pub mod world;
 
 pub use behavior::Behavior;
+pub use building::{
+    crop_progress, Building, Buildings, Footprint, PlaceError, PlacementRules, ResourceNode,
+};
 pub use chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
 pub use clock::GameClock;
 pub use path::{find_path, Cell};

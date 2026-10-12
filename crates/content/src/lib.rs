@@ -64,6 +64,38 @@ impl Race {
     }
 }
 
+/// A placeable building type. Everything about placement and production is data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildingDef {
+    pub id: String,
+    pub name: String,
+    /// Footprint in cells (width along x, depth along z).
+    pub width: i32,
+    pub depth: i32,
+    /// Resource node type this must be placed on (e.g. "iron_ore"); `None` = anywhere.
+    #[serde(default)]
+    pub requires_resource: Option<String>,
+    /// Whether residents can live here.
+    #[serde(default)]
+    pub dwelling: bool,
+    /// Build cost: resource id -> amount.
+    #[serde(default)]
+    pub cost: BTreeMap<String, f32>,
+    /// Crop id grown here, if this is a farm.
+    #[serde(default)]
+    pub crop: Option<String>,
+}
+
+/// A crop: grows over in-game days; the clock drives growth, so there is no per-tick work.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Crop {
+    pub id: String,
+    pub name: String,
+    pub growth_days: f32,
+    pub yield_amount: f32,
+    pub yield_resource: String,
+}
+
 /// Data-driven movement behaviour. `wander_range == 0` means the unit stays put.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Behavior {
@@ -92,6 +124,8 @@ pub struct Content {
     pub biomes: Vec<Biome>,
     pub races: Vec<Race>,
     pub behaviors: Vec<Behavior>,
+    pub buildings: Vec<BuildingDef>,
+    pub crops: Vec<Crop>,
 }
 
 #[derive(Debug)]
@@ -173,6 +207,33 @@ pub fn load_content(dir: impl AsRef<Path>) -> Result<Content, ContentError> {
     let hp = dir.join("behaviors.json");
     let races: Vec<Race> = load_file(&rp)?;
     let behaviors: Vec<Behavior> = load_file(&hp)?;
+    let bdp = dir.join("buildings.json");
+    let cp = dir.join("crops.json");
+    let buildings: Vec<BuildingDef> = load_file(&bdp)?;
+    let crops: Vec<Crop> = load_file(&cp)?;
+    check_unique(&bdp, buildings.iter().map(|b| &b.id))?;
+    check_unique(&cp, crops.iter().map(|c| &c.id))?;
+    for c in &crops {
+        if c.growth_days <= 0.0 || c.yield_amount < 0.0 {
+            return Err(invalid(&cp, format!("crop '{}' has invalid values", c.id)));
+        }
+    }
+    for b in &buildings {
+        if b.width < 1 || b.depth < 1 {
+            return Err(invalid(
+                &bdp,
+                format!("building '{}' needs a footprint >= 1x1", b.id),
+            ));
+        }
+        if let Some(c) = &b.crop {
+            if !crops.iter().any(|x| &x.id == c) {
+                return Err(invalid(
+                    &bdp,
+                    format!("building '{}' references unknown crop '{c}'", b.id),
+                ));
+            }
+        }
+    }
     check_unique(&rp, races.iter().map(|r| &r.id))?;
     check_unique(&hp, behaviors.iter().map(|b| &b.id))?;
     for b in &behaviors {
@@ -241,6 +302,8 @@ pub fn load_content(dir: impl AsRef<Path>) -> Result<Content, ContentError> {
         biomes,
         races,
         behaviors,
+        buildings,
+        crops,
     })
 }
 
@@ -261,6 +324,16 @@ mod tests {
     }
 
     #[test]
+    fn loads_buildings_and_crops() {
+        let c = load_content(assets_dir()).unwrap();
+        let farm = c.buildings.iter().find(|b| b.id == "farm").unwrap();
+        assert_eq!(farm.crop.as_deref(), Some("wheat"));
+        assert!(c.buildings.iter().any(|b| b.dwelling));
+        let mine = c.buildings.iter().find(|b| b.id == "iron_mine").unwrap();
+        assert_eq!(mine.requires_resource.as_deref(), Some("iron_ore"));
+    }
+
+    #[test]
     fn race_modifiers_apply() {
         let c = load_content(assets_dir()).unwrap();
         let human = c.races.iter().find(|r| r.id == "human").unwrap();
@@ -277,7 +350,14 @@ mod tests {
         let src = assets_dir();
         let dir = std::env::temp_dir().join("ashen_world_bad_ref");
         std::fs::create_dir_all(&dir).unwrap();
-        for f in ["factions", "biomes", "races", "behaviors"] {
+        for f in [
+            "factions",
+            "biomes",
+            "races",
+            "behaviors",
+            "buildings",
+            "crops",
+        ] {
             std::fs::copy(src.join(format!("{f}.json")), dir.join(format!("{f}.json"))).unwrap();
         }
         std::fs::write(

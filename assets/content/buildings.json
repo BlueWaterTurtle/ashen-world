@@ -1,0 +1,6 @@
+[
+  { "id": "house", "name": "House", "width": 4, "depth": 4, "dwelling": true, "cost": { "wood": 20.0 } },
+  { "id": "farm", "name": "Farm", "width": 8, "depth": 8, "crop": "wheat", "cost": { "wood": 10.0 } },
+  { "id": "iron_mine", "name": "Iron Mine", "width": 4, "depth": 4, "requires_resource": "iron_ore", "cost": { "wood": 30.0 } },
+  { "id": "workshop", "name": "Workshop", "width": 6, "depth": 5, "cost": { "wood": 40.0, "iron": 10.0 } }
+]
