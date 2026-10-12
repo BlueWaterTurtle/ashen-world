@@ -29,3 +29,9 @@ cargo test --workspace
 
 ## Roadmap (Milestone 2)
 Milestone 2 (done): seeded terrain heightmaps, chunk streaming and grid A* in `core_sim`. Milestone 3 (headless part done): wandering agents with budgeted path requests. Next: real GPU rendering (wgpu) with terrain meshes, needs/inventory, content-driven archetypes.
+
+
+## Data-driven content
+Gameplay values live in `assets/content/*.json`, not the engine: `factions`, `units`, `biomes`, `races` (base stats plus buff/debuff modifiers) and `behaviors` (wander range, pause time, speed multiplier). Units reference a race and behavior by id; references are validated on load. `core_sim::GameClock` derives day/time-of-day from the tick counter (no per-tick cost) for future crop growth.
+
+Planned next: ECS migration (hecs), levels/skills, static map + resources, buildings/farming/cities, LOD scheduling, wgpu renderer.
