@@ -33,15 +33,16 @@ fn value_noise(seed: u64, x: f32, z: f32, scale: f32) -> f32 {
     top + (bot - top) * tz
 }
 
-/// Terrain height in meters at a world position (two octaves of noise).
+/// Terrain height in meters (three octaves of noise: broad hills, mid relief, fine detail).
 pub fn height_at(seed: u64, x: f32, z: f32) -> f32 {
-    let base = value_noise(seed, x, z, 128.0);
-    let detail = value_noise(seed.wrapping_add(1), x, z, 24.0);
-    (base * 0.8 + detail * 0.2) * 40.0
+    let broad = value_noise(seed, x, z, 180.0);
+    let mid = value_noise(seed.wrapping_add(1), x, z, 52.0);
+    let fine = value_noise(seed.wrapping_add(2), x, z, 14.0);
+    (broad * 0.72 + mid * 0.22 + fine * 0.06) * 40.0
 }
 
 /// Maximum height difference (meters) between adjacent cells that can still be walked.
-pub const MAX_STEP_HEIGHT: f32 = 0.35;
+pub const MAX_STEP_HEIGHT: f32 = 0.2;
 
 /// Whether the 1m cell is walkable: no neighbouring cell is too steep a step away.
 pub fn is_walkable(seed: u64, cell: (i32, i32)) -> bool {

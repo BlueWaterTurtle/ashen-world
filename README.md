@@ -16,7 +16,7 @@ Workspace, window + fixed-timestep loop, camera stub, placeholder renderer (top-
 
 ## Run
 ```sh
-cargo run -p game_client --release   # WASD pan, Q/E down/up, Esc quit
+cargo run -p game_client --release   # WASD pan, wheel zoom, Esc quit
 ```
 Frame time, sim ticks/sec and entity count print to stdout once per second. Requires a desktop display.
 

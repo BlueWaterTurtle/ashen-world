@@ -1,4 +1,5 @@
 mod camera;
+mod shade;
 
 use camera::Camera;
 use core_sim::{Behavior, ChunkStreamer, World, WorldConfig, WorldPos, CHUNK_SIZE, TICK_DT};
@@ -6,7 +7,7 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -33,6 +34,8 @@ struct Stats {
 struct App {
     world: World,
     terrain: ChunkStreamer,
+    /// Zoom multiplier on the base pixels-per-meter scale (mouse wheel).
+    zoom: f32,
     camera: Camera,
     input: Input,
     accumulator: f32,
@@ -48,6 +51,7 @@ impl App {
         Self {
             terrain: ChunkStreamer::new(world.seed, 3),
             world,
+            zoom: 1.0,
             camera: Camera::default(),
             input: Input::default(),
             accumulator: 0.0,
@@ -114,9 +118,9 @@ impl App {
         let Ok(mut buf) = surface.buffer_mut() else {
             return;
         };
-        let terrain = &self.terrain;
+        let seed = self.world.seed;
         self.camera.aspect = size.width as f32 / size.height as f32;
-        let px_per_unit = size.height as f32 / (CHUNK_SIZE * 4.0);
+        let px_per_unit = size.height as f32 / (CHUNK_SIZE * 4.0) * self.zoom;
         let (cx, cz) = (self.camera.position[0], self.camera.position[2]);
         // Sample terrain once per BLOCK x BLOCK pixel block to keep the CPU cost low.
         const BLOCK: usize = 4;
@@ -125,24 +129,27 @@ impl App {
             for bx in (0..width).step_by(BLOCK) {
                 let wx = ((bx + BLOCK / 2) as f32 - width as f32 / 2.0) / px_per_unit + cx;
                 let wz = ((by + BLOCK / 2) as f32 - height as f32 / 2.0) / px_per_unit + cz;
-                let wp = WorldPos::new(wx, 0.0, wz);
-                let l = wp.local();
-                let shade = terrain
-                    .get(wp.chunk())
-                    .map(|t| t.height(l.x as usize, l.z as usize))
-                    .map_or(0.0, |h| h / 40.0);
-                let v = (24.0 + shade * 70.0) as u32;
-                let color = (v << 16) | ((v * 9 / 10) << 8) | (v * 8 / 10);
+                let color = shade::terrain_color(seed, wx, wz);
                 for py in by..(by + BLOCK).min(height) {
                     buf[py * width + bx..py * width + (bx + BLOCK).min(width)].fill(color);
                 }
             }
         }
+        // Agents: a dark-outlined square that grows with zoom so they stay visible.
+        let half = ((px_per_unit * 0.6).round() as i32).clamp(1, 6);
         for p in &self.world.positions {
-            let sx = (p.x - cx) * px_per_unit + size.width as f32 / 2.0;
-            let sy = (p.z - cz) * px_per_unit + size.height as f32 / 2.0;
-            if sx >= 0.0 && sy >= 0.0 && (sx as u32) < size.width && (sy as u32) < size.height {
-                buf[sy as usize * size.width as usize + sx as usize] = 0x00d9_a441;
+            let sx = ((p.x - cx) * px_per_unit + width as f32 / 2.0) as i32;
+            let sy = ((p.z - cz) * px_per_unit + height as f32 / 2.0) as i32;
+            for dy in -half - 1..=half + 1 {
+                for dx in -half - 1..=half + 1 {
+                    let (x, y) = (sx + dx, sy + dy);
+                    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+                        continue;
+                    }
+                    let edge = dx.abs() > half || dy.abs() > half;
+                    buf[y as usize * width + x as usize] =
+                        if edge { 0x0010_0c0a } else { 0x00f2_c14e };
+                }
             }
         }
         let _ = buf.present();
@@ -189,6 +196,13 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let steps = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+                self.zoom = (self.zoom * 1.15f32.powf(steps)).clamp(0.25, 8.0);
             }
             WindowEvent::RedrawRequested => {
                 self.frame();
