@@ -2,6 +2,10 @@ use std::collections::VecDeque;
 
 use crate::behavior::Behavior;
 use crate::chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
+use crate::npc::{
+    DespawnError, EntityKind, Inventory, LodConfig, NavGoal, NpcId, PersistentNpcRecord, SimTier,
+    Skills,
+};
 use crate::path::{Cell, Pathfinder};
 use crate::rng::Rng;
 use crate::terrain::{height_at, WalkabilityCache};
@@ -96,6 +100,8 @@ pub struct WorldConfig {
     pub max_path_requests_per_tick: usize,
     /// Number of starting characters controlled by the player (default: 1).
     pub starting_player_characters: usize,
+    /// Simulation LOD configuration for persistent NPCs.
+    pub lod: LodConfig,
 }
 
 impl Default for WorldConfig {
@@ -107,7 +113,15 @@ impl Default for WorldConfig {
             behaviors: vec![Behavior::default()],
             max_path_requests_per_tick: 8,
             starting_player_characters: 1,
+            lod: LodConfig::default(),
         }
+    }
+}
+
+impl WorldConfig {
+    pub fn with_lod(mut self, lod: LodConfig) -> Self {
+        self.lod = lod;
+        self
     }
 }
 
@@ -129,6 +143,10 @@ pub struct World {
     wander_queued: Vec<bool>,
     /// The currently selected player character, if any.
     pub selected_player_character: Option<Entity>,
+    /// Simulation LOD configuration.
+    pub lod: LodConfig,
+    /// Deterministic focus points driving LOD tier evaluation (e.g. camera, encounters).
+    pub focus_points: Vec<WorldPos>,
 }
 
 /// Maximum A* node expansions per path request.
@@ -172,7 +190,10 @@ impl World {
             let bid = i % behaviors.len();
             let is_player = i < starting_players;
             let is_recruitable = !is_player && behaviors[bid].recruitable;
+            let entity = Entity(i as u32);
+            let npc_id = NpcId(i as u64 + 1);
             ids.push(ecs.spawn((
+                entity,
                 Position(pos),
                 Velocity::default(),
                 Path::default(),
@@ -180,6 +201,12 @@ impl World {
                 Pause::default(),
                 PlayerControlled(is_player),
                 Recruitable(is_recruitable),
+                npc_id,
+                EntityKind::PersistentNpc,
+                SimTier::Active,
+                Skills::default(),
+                Inventory::default(),
+                NavGoal::default(),
             )));
         }
         let selected_player_character = if starting_players > 0 {
@@ -188,7 +215,7 @@ impl World {
             None
         };
         let wander_queue: VecDeque<u32> = (0..config.agent_count as u32).collect();
-        Self {
+        let mut world = Self {
             seed: config.seed,
             tick: 0,
             ecs,
@@ -201,27 +228,49 @@ impl World {
             wander_queue,
             wander_queued: vec![true; config.agent_count],
             selected_player_character,
+            lod: config.lod.clone(),
+            focus_points: Vec::new(),
+        };
+        if world.lod.enabled {
+            world.update_simulation_tiers();
         }
+        world
+    }
+
+    pub fn is_alive(&self, e: Entity) -> bool {
+        self.ids
+            .get(e.0 as usize)
+            .is_some_and(|&id| self.ecs.contains(id))
     }
 
     pub fn entity_count(&self) -> usize {
-        self.ids.len()
+        self.ids.iter().filter(|&&id| self.ecs.contains(id)).count()
     }
 
     pub fn entities(&self) -> impl Iterator<Item = Entity> {
-        (0..self.ids.len() as u32).map(Entity)
+        (0..self.ids.len() as u32)
+            .filter(|&i| {
+                self.ids
+                    .get(i as usize)
+                    .is_some_and(|&id| self.ecs.contains(id))
+            })
+            .map(Entity)
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     pub fn position(&self, e: Entity) -> WorldPos {
-        self.ecs
-            .get::<&Position>(self.ids[e.0 as usize])
-            .map(|p| p.0)
+        self.ids
+            .get(e.0 as usize)
+            .and_then(|&id| self.ecs.get::<&Position>(id).ok().map(|p| p.0))
             .unwrap_or_default()
     }
 
     pub fn set_position(&mut self, e: Entity, p: WorldPos) {
-        if let Ok(mut c) = self.ecs.get::<&mut Position>(self.ids[e.0 as usize]) {
-            c.0 = p;
+        if let Some(&id) = self.ids.get(e.0 as usize) {
+            if let Ok(mut c) = self.ecs.get::<&mut Position>(id) {
+                c.0 = p;
+            }
         }
     }
 
@@ -236,32 +285,395 @@ impl World {
     }
 
     pub fn is_navigating(&self, e: Entity) -> bool {
-        self.ecs
-            .get::<&Path>(self.ids[e.0 as usize])
-            .map(|p| p.0.is_some())
+        self.ids
+            .get(e.0 as usize)
+            .and_then(|&id| self.ecs.get::<&Path>(id).ok().map(|p| p.0.is_some()))
             .unwrap_or(false)
     }
 
     pub fn behavior_of(&self, e: Entity) -> usize {
-        self.ecs
-            .get::<&BehaviorId>(self.ids[e.0 as usize])
-            .map(|b| b.0)
+        self.ids
+            .get(e.0 as usize)
+            .and_then(|&id| self.ecs.get::<&BehaviorId>(id).ok().map(|b| b.0))
             .unwrap_or(0)
     }
 
     pub fn pause_of(&self, e: Entity) -> u32 {
-        self.ecs
-            .get::<&Pause>(self.ids[e.0 as usize])
-            .map(|p| p.0)
+        self.ids
+            .get(e.0 as usize)
+            .and_then(|&id| self.ecs.get::<&Pause>(id).ok().map(|p| p.0))
             .unwrap_or(0)
     }
 
     pub fn set_pause(&mut self, e: Entity, ticks: u32) {
-        if let Ok(mut p) = self.ecs.get::<&mut Pause>(self.ids[e.0 as usize]) {
-            p.0 = ticks;
+        if let Some(&id) = self.ids.get(e.0 as usize) {
+            if let Ok(mut p) = self.ecs.get::<&mut Pause>(id) {
+                p.0 = ticks;
+            }
         }
         if ticks == 0 {
             self.enqueue_wander(e.0);
+        }
+    }
+
+    pub fn npc_id(&self, e: Entity) -> Option<NpcId> {
+        self.ids
+            .get(e.0 as usize)
+            .and_then(|&id| self.ecs.get::<&NpcId>(id).ok().map(|n| *n))
+    }
+
+    pub fn entity_by_npc_id(&self, target: NpcId) -> Option<Entity> {
+        for (_, (entity, id)) in self.ecs.query::<(&Entity, &NpcId)>().iter() {
+            if *id == target {
+                return Some(*entity);
+            }
+        }
+        None
+    }
+
+    pub fn entity_kind(&self, e: Entity) -> Option<EntityKind> {
+        self.ids
+            .get(e.0 as usize)
+            .and_then(|&id| self.ecs.get::<&EntityKind>(id).ok().map(|k| *k))
+    }
+
+    pub fn tier(&self, e: Entity) -> SimTier {
+        self.ids
+            .get(e.0 as usize)
+            .and_then(|&id| self.ecs.get::<&SimTier>(id).ok().map(|t| *t))
+            .unwrap_or(SimTier::Active)
+    }
+
+    pub fn set_tier(&mut self, e: Entity, new_tier: SimTier) {
+        let current = self.tier(e);
+        if current != new_tier {
+            self.transition_tier(e, current, new_tier);
+        }
+    }
+
+    pub fn skills(&self, e: Entity) -> Option<hecs::Ref<'_, Skills>> {
+        let id = *self.ids.get(e.0 as usize)?;
+        self.ecs.get::<&Skills>(id).ok()
+    }
+
+    pub fn skills_mut(&mut self, e: Entity) -> Option<hecs::RefMut<'_, Skills>> {
+        let id = *self.ids.get(e.0 as usize)?;
+        self.ecs.get::<&mut Skills>(id).ok()
+    }
+
+    pub fn inventory(&self, e: Entity) -> Option<hecs::Ref<'_, Inventory>> {
+        let id = *self.ids.get(e.0 as usize)?;
+        self.ecs.get::<&Inventory>(id).ok()
+    }
+
+    pub fn inventory_mut(&mut self, e: Entity) -> Option<hecs::RefMut<'_, Inventory>> {
+        let id = *self.ids.get(e.0 as usize)?;
+        self.ecs.get::<&mut Inventory>(id).ok()
+    }
+
+    pub fn nav_goal(&self, e: Entity) -> Option<WorldPos> {
+        self.ids
+            .get(e.0 as usize)
+            .and_then(|&id| self.ecs.get::<&NavGoal>(id).ok().and_then(|g| g.0))
+    }
+
+    pub fn set_nav_goal(&mut self, e: Entity, goal: Option<WorldPos>) {
+        if let Some(&id) = self.ids.get(e.0 as usize) {
+            if let Ok(mut g) = self.ecs.get::<&mut NavGoal>(id) {
+                g.0 = goal;
+            }
+        }
+    }
+
+    pub fn focus_points(&self) -> &[WorldPos] {
+        &self.focus_points
+    }
+
+    pub fn set_focus_points(&mut self, points: Vec<WorldPos>) {
+        self.focus_points = points;
+    }
+
+    pub fn add_focus_point(&mut self, point: WorldPos) {
+        self.focus_points.push(point);
+    }
+
+    pub fn clear_focus_points(&mut self) {
+        self.focus_points.clear();
+    }
+
+    /// Whether an agent currently has an active waypoint path.
+    pub fn has_path(&self, e: Entity) -> bool {
+        self.ids
+            .get(e.0 as usize)
+            .and_then(|&id| self.ecs.get::<&Path>(id).ok().map(|p| p.0.is_some()))
+            .unwrap_or(false)
+    }
+
+    /// Despawn an entity from active simulation and extract its persistent state.
+    pub fn despawn_npc(&mut self, e: Entity) -> Result<PersistentNpcRecord, DespawnError> {
+        let idx = e.0 as usize;
+        let Some(&id) = self.ids.get(idx) else {
+            return Err(DespawnError::NotFound);
+        };
+        if !self.ecs.contains(id) {
+            return Err(DespawnError::AlreadyDespawned);
+        }
+
+        let record = PersistentNpcRecord {
+            id: self.ecs.get::<&NpcId>(id).map(|i| *i).unwrap_or_default(),
+            kind: self
+                .ecs
+                .get::<&EntityKind>(id)
+                .map(|k| *k)
+                .unwrap_or_default(),
+            position: self
+                .ecs
+                .get::<&Position>(id)
+                .map(|p| p.0)
+                .unwrap_or_default(),
+            velocity: self
+                .ecs
+                .get::<&Velocity>(id)
+                .map(|v| v.0)
+                .unwrap_or_default(),
+            goal: self.ecs.get::<&NavGoal>(id).ok().and_then(|g| g.0),
+            behavior_id: self.ecs.get::<&BehaviorId>(id).map(|b| b.0).unwrap_or(0),
+            pause_ticks: self.ecs.get::<&Pause>(id).map(|p| p.0).unwrap_or(0),
+            player_controlled: self
+                .ecs
+                .get::<&PlayerControlled>(id)
+                .map(|p| p.0)
+                .unwrap_or(false),
+            recruitable: self
+                .ecs
+                .get::<&Recruitable>(id)
+                .map(|r| r.0)
+                .unwrap_or(false),
+            tier: self.ecs.get::<&SimTier>(id).map(|t| *t).unwrap_or_default(),
+            skills: self.skills(e).map(|s| (*s).clone()).unwrap_or_default(),
+            inventory: self.inventory(e).map(|i| (*i).clone()).unwrap_or_default(),
+        };
+
+        let _ = self.ecs.despawn(id);
+        self.ids[idx] = hecs::Entity::DANGLING;
+        if idx < self.wander_queued.len() {
+            self.wander_queued[idx] = false;
+        }
+
+        if self.selected_player_character == Some(e) {
+            let next_pc = self.player_characters().next();
+            self.selected_player_character = next_pc;
+        }
+
+        Ok(record)
+    }
+
+    /// Resume a previously despawned persistent NPC into active simulation.
+    pub fn resume_npc(&mut self, mut record: PersistentNpcRecord) -> Entity {
+        if record.tier == SimTier::Active {
+            let cell = (
+                record.position.x.floor() as i32,
+                record.position.z.floor() as i32,
+            );
+            if !self.walkability_cache.is_walkable(self.seed, cell) {
+                if let Some(walkable) = self.find_nearest_walkable_cell(cell, 3) {
+                    record.position = WorldPos::new(
+                        walkable.0 as f32 + 0.5,
+                        height_at(self.seed, walkable.0 as f32 + 0.5, walkable.1 as f32 + 0.5),
+                        walkable.1 as f32 + 0.5,
+                    );
+                }
+            }
+        }
+
+        let (entity, is_new_slot) = if let Some((idx, _)) = self
+            .ids
+            .iter()
+            .enumerate()
+            .find(|(_, id)| !self.ecs.contains(**id))
+        {
+            (Entity(idx as u32), false)
+        } else {
+            (Entity(self.ids.len() as u32), true)
+        };
+
+        let hecs_id = self.ecs.spawn((
+            entity,
+            Position(record.position),
+            Velocity(record.velocity),
+            Path::default(),
+            BehaviorId(record.behavior_id),
+            Pause(record.pause_ticks),
+            PlayerControlled(record.player_controlled),
+            Recruitable(record.recruitable),
+            record.id,
+            record.kind,
+            record.tier,
+            record.skills,
+            record.inventory,
+            NavGoal(record.goal),
+        ));
+
+        if is_new_slot {
+            self.ids.push(hecs_id);
+            self.wander_queued.push(false);
+        } else {
+            self.ids[entity.0 as usize] = hecs_id;
+            self.wander_queued[entity.0 as usize] = false;
+        }
+
+        if record.tier == SimTier::Active {
+            if let Some(goal) = record.goal {
+                self.navigate_to(entity, goal);
+            } else if record.pause_ticks == 0 {
+                self.enqueue_wander(entity.0);
+            }
+        }
+
+        entity
+    }
+
+    pub(crate) fn find_nearest_walkable_cell(
+        &mut self,
+        center: (i32, i32),
+        max_radius: i32,
+    ) -> Option<(i32, i32)> {
+        if self.walkability_cache.is_walkable(self.seed, center) {
+            return Some(center);
+        }
+        for r in 1..=max_radius {
+            for dx in -r..=r {
+                for dz in -r..=r {
+                    if dx.abs() != r && dz.abs() != r {
+                        continue;
+                    }
+                    let c = (center.0 + dx, center.1 + dz);
+                    if self.walkability_cache.is_walkable(self.seed, c) {
+                        return Some(c);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn transition_tier(&mut self, e: Entity, old: SimTier, new: SimTier) {
+        let Some(&id) = self.ids.get(e.0 as usize) else {
+            return;
+        };
+        if !self.ecs.contains(id) {
+            return;
+        }
+
+        if let Ok(mut t) = self.ecs.get::<&mut SimTier>(id) {
+            *t = new;
+        }
+
+        match (old, new) {
+            (SimTier::Dormant, SimTier::Active) | (SimTier::Dormant, SimTier::Reduced) => {
+                let p = self.position(e);
+                let cell = (p.x.floor() as i32, p.z.floor() as i32);
+                if let Some(walkable) = self.find_nearest_walkable_cell(cell, 3) {
+                    if walkable != cell {
+                        let snapped = WorldPos::new(
+                            walkable.0 as f32 + 0.5,
+                            height_at(self.seed, walkable.0 as f32 + 0.5, walkable.1 as f32 + 0.5),
+                            walkable.1 as f32 + 0.5,
+                        );
+                        self.set_position(e, snapped);
+                    }
+                }
+
+                let goal = self.nav_goal(e);
+                if let Some(goal) = goal {
+                    if !self.navigate_to(e, goal) {
+                        self.set_pause(e, WANDER_BACKOFF_TICKS);
+                        self.set_nav_goal(e, None);
+                    }
+                } else if self.pause_of(e) == 0 {
+                    self.enqueue_wander(e.0);
+                }
+            }
+            (SimTier::Active, SimTier::Dormant) | (SimTier::Reduced, SimTier::Dormant) => {
+                if let Ok(mut path) = self.ecs.get::<&mut Path>(id) {
+                    if let Some(wp) = path.0.take() {
+                        if let Some(&(cx, cz)) = wp.back() {
+                            let dest = WorldPos::new(
+                                cx as f32 + 0.5,
+                                height_at(self.seed, cx as f32 + 0.5, cz as f32 + 0.5),
+                                cz as f32 + 0.5,
+                            );
+                            if let Ok(mut g) = self.ecs.get::<&mut NavGoal>(id) {
+                                g.0 = Some(dest);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn update_simulation_tiers(&mut self) {
+        if !self.lod.enabled {
+            return;
+        }
+
+        let mut focus: Vec<WorldPos> = self.focus_points.clone();
+        if self.lod.track_player_focus {
+            for &id in &self.ids {
+                if self.ecs.contains(id) {
+                    if let Ok(pc) = self.ecs.get::<&PlayerControlled>(id) {
+                        if pc.0 {
+                            if let Ok(pos) = self.ecs.get::<&Position>(id) {
+                                focus.push(pos.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if focus.is_empty() {
+            focus.push(WorldPos::new(0.0, 0.0, 0.0));
+        }
+
+        let active_r_sq = self.lod.active_radius * self.lod.active_radius;
+        let reduced_r_sq = self.lod.reduced_radius * self.lod.reduced_radius;
+
+        let mut changes = Vec::new();
+        for (_, (entity, pos, pc, tier)) in self
+            .ecs
+            .query::<(&Entity, &Position, &PlayerControlled, &SimTier)>()
+            .iter()
+        {
+            let target_tier = if pc.0 {
+                SimTier::Active
+            } else {
+                let mut min_d_sq = f32::MAX;
+                for f in &focus {
+                    let dx = pos.0.x - f.x;
+                    let dz = pos.0.z - f.z;
+                    let d_sq = dx * dx + dz * dz;
+                    if d_sq < min_d_sq {
+                        min_d_sq = d_sq;
+                    }
+                }
+                if min_d_sq <= active_r_sq {
+                    SimTier::Active
+                } else if min_d_sq <= reduced_r_sq {
+                    SimTier::Reduced
+                } else {
+                    SimTier::Dormant
+                }
+            };
+
+            if target_tier != *tier {
+                changes.push((*entity, *tier, target_tier));
+            }
+        }
+
+        for (e, old_tier, new_tier) in changes {
+            self.transition_tier(e, old_tier, new_tier);
         }
     }
 
@@ -286,19 +698,28 @@ impl World {
     /// Plan a walkable route for `e` to the cell containing `goal`.
     /// Returns false (and leaves the entity unchanged) if no route is found.
     pub fn navigate_to(&mut self, e: Entity, goal: WorldPos) -> bool {
-        let id = self.ids[e.0 as usize];
+        let Some(&id) = self.ids.get(e.0 as usize) else {
+            return false;
+        };
+        if !self.ecs.contains(id) {
+            return false;
+        }
         let p = self.position(e);
         let start = (p.x.floor() as i32, p.z.floor() as i32);
-        let goal = (goal.x.floor() as i32, goal.z.floor() as i32);
+        let goal_cell = (goal.x.floor() as i32, goal.z.floor() as i32);
         let seed = self.seed;
         let cache = &mut self.walkability_cache;
         match self
             .pathfinder
-            .find_path(start, goal, PATH_BUDGET, |c| cache.is_walkable(seed, c))
-        {
+            .find_path(start, goal_cell, PATH_BUDGET, |c| {
+                cache.is_walkable(seed, c)
+            }) {
             Some(path) => {
                 if let Ok(mut c) = self.ecs.get::<&mut Path>(id) {
                     c.0 = Some(path.into_iter().skip(1).collect());
+                }
+                if let Ok(mut g) = self.ecs.get::<&mut NavGoal>(id) {
+                    g.0 = Some(goal);
                 }
                 true
             }
@@ -308,6 +729,9 @@ impl World {
 
     /// Advance the simulation by exactly one fixed tick.
     pub fn step(&mut self) {
+        if self.lod.enabled {
+            self.update_simulation_tiers();
+        }
         self.assign_wander_goals();
         self.follow_paths();
         self.tick += 1;
@@ -330,6 +754,9 @@ impl World {
                 || self.pause_of(e) > 0
                 || r == 0
             {
+                continue;
+            }
+            if self.lod.enabled && self.tier(e) == SimTier::Dormant {
                 continue;
             }
             requests += 1;
@@ -364,62 +791,159 @@ impl World {
         let rng = &mut self.rng;
         let queue = &mut self.wander_queue;
         let queued = &mut self.wander_queued;
-        // All agents share one archetype, so iteration order is spawn order.
-        for (i, (_, (pos, vel, path, bid, pause))) in self
+        let reduced_interval = self.lod.reduced_tick_interval.max(1);
+
+        for (_, (entity, pos, vel, path, bid, pause, tier, nav_goal)) in self
             .ecs
             .query_mut::<(
+                &Entity,
                 &mut Position,
                 &mut Velocity,
                 &mut Path,
                 &BehaviorId,
                 &mut Pause,
+                &SimTier,
+                &mut NavGoal,
             )>()
             .into_iter()
-            .enumerate()
         {
-            let was_paused = pause.0 > 0;
-            pause.0 = pause.0.saturating_sub(1);
-            let mut enqueue = was_paused && pause.0 == 0 && path.0.is_none();
+            let i = entity.0 as usize;
             let b = &behaviors[bid.0];
-            let step_len = b.speed * TICK_DT;
-            let Some(wp) = path.0.as_mut() else {
-                if enqueue && !queued[i] {
-                    queued[i] = true;
-                    queue.push_back(i as u32);
+
+            match *tier {
+                SimTier::Active => {
+                    let was_paused = pause.0 > 0;
+                    pause.0 = pause.0.saturating_sub(1);
+                    let mut enqueue = was_paused && pause.0 == 0 && path.0.is_none();
+                    let step_len = b.speed * TICK_DT;
+                    let Some(wp) = path.0.as_mut() else {
+                        if enqueue && i < queued.len() && !queued[i] {
+                            queued[i] = true;
+                            queue.push_back(entity.0);
+                        }
+                        continue;
+                    };
+                    let Some(&(cx, cz)) = wp.front() else {
+                        path.0 = None;
+                        nav_goal.0 = None;
+                        vel.0 = WorldPos::default();
+                        let (min, max) = (b.pause_ticks_min, b.pause_ticks_max);
+                        let extra = if max > min {
+                            (rng.next_u64() % (max - min + 1) as u64) as u32
+                        } else {
+                            0
+                        };
+                        pause.0 = min + extra;
+                        if pause.0 == 0 {
+                            enqueue = true;
+                        }
+                        if enqueue && i < queued.len() && !queued[i] {
+                            queued[i] = true;
+                            queue.push_back(entity.0);
+                        }
+                        continue;
+                    };
+                    let (tx, tz) = (cx as f32 + 0.5, cz as f32 + 0.5);
+                    let (dx, dz) = (tx - pos.0.x, tz - pos.0.z);
+                    let dist = (dx * dx + dz * dz).sqrt();
+                    if dist <= step_len {
+                        pos.0 = WorldPos::new(tx, height_at(seed, tx, tz), tz);
+                        vel.0 = WorldPos::default();
+                        wp.pop_front();
+                    } else {
+                        vel.0 = WorldPos::new(dx / dist * b.speed, 0.0, dz / dist * b.speed);
+                        pos.0.x += vel.0.x * TICK_DT;
+                        pos.0.z += vel.0.z * TICK_DT;
+                        pos.0.y = height_at(seed, pos.0.x, pos.0.z);
+                    }
                 }
-                continue;
-            };
-            let Some(&(cx, cz)) = wp.front() else {
-                path.0 = None;
-                vel.0 = WorldPos::default();
-                let (min, max) = (b.pause_ticks_min, b.pause_ticks_max);
-                let extra = if max > min {
-                    (rng.next_u64() % (max - min + 1) as u64) as u32
-                } else {
-                    0
-                };
-                pause.0 = min + extra;
-                if pause.0 == 0 {
-                    enqueue = true;
+                SimTier::Reduced => {
+                    let on_tick = (self.tick + entity.0 as u64) % (reduced_interval as u64) == 0;
+                    if !on_tick {
+                        continue;
+                    }
+                    let was_paused = pause.0 > 0;
+                    pause.0 = pause.0.saturating_sub(reduced_interval);
+                    let mut enqueue = was_paused && pause.0 == 0 && path.0.is_none();
+                    let step_len = b.speed * TICK_DT * (reduced_interval as f32);
+                    let Some(wp) = path.0.as_mut() else {
+                        if enqueue && i < queued.len() && !queued[i] {
+                            queued[i] = true;
+                            queue.push_back(entity.0);
+                        }
+                        continue;
+                    };
+                    let Some(&(cx, cz)) = wp.front() else {
+                        path.0 = None;
+                        nav_goal.0 = None;
+                        vel.0 = WorldPos::default();
+                        let (min, max) = (b.pause_ticks_min, b.pause_ticks_max);
+                        let extra = if max > min {
+                            (rng.next_u64() % (max - min + 1) as u64) as u32
+                        } else {
+                            0
+                        };
+                        pause.0 = min + extra;
+                        if pause.0 == 0 {
+                            enqueue = true;
+                        }
+                        if enqueue && i < queued.len() && !queued[i] {
+                            queued[i] = true;
+                            queue.push_back(entity.0);
+                        }
+                        continue;
+                    };
+                    let (tx, tz) = (cx as f32 + 0.5, cz as f32 + 0.5);
+                    let (dx, dz) = (tx - pos.0.x, tz - pos.0.z);
+                    let dist = (dx * dx + dz * dz).sqrt();
+                    if dist <= step_len {
+                        pos.0 = WorldPos::new(tx, height_at(seed, tx, tz), tz);
+                        vel.0 = WorldPos::default();
+                        wp.pop_front();
+                    } else {
+                        vel.0 = WorldPos::new(dx / dist * b.speed, 0.0, dz / dist * b.speed);
+                        pos.0.x += vel.0.x * TICK_DT * (reduced_interval as f32);
+                        pos.0.z += vel.0.z * TICK_DT * (reduced_interval as f32);
+                        pos.0.y = height_at(seed, pos.0.x, pos.0.z);
+                    }
                 }
-                if enqueue && !queued[i] {
-                    queued[i] = true;
-                    queue.push_back(i as u32);
+                SimTier::Dormant => {
+                    pause.0 = pause.0.saturating_sub(1);
+                    let step_len = b.speed * TICK_DT;
+
+                    if let Some(target) = nav_goal.0 {
+                        let dx = target.x - pos.0.x;
+                        let dz = target.z - pos.0.z;
+                        let dist = (dx * dx + dz * dz).sqrt();
+                        if dist <= step_len {
+                            pos.0 = WorldPos::new(
+                                target.x,
+                                height_at(seed, target.x, target.z),
+                                target.z,
+                            );
+                            vel.0 = WorldPos::default();
+                            nav_goal.0 = None;
+                            let (min, max) = (b.pause_ticks_min, b.pause_ticks_max);
+                            let extra = if max > min {
+                                (rng.next_u64() % (max - min + 1) as u64) as u32
+                            } else {
+                                0
+                            };
+                            pause.0 = min + extra;
+                        } else {
+                            vel.0 = WorldPos::new(dx / dist * b.speed, 0.0, dz / dist * b.speed);
+                            pos.0.x += vel.0.x * TICK_DT;
+                            pos.0.z += vel.0.z * TICK_DT;
+                            pos.0.y = height_at(seed, pos.0.x, pos.0.z);
+                        }
+                    } else if pause.0 == 0 && b.wander_range > 0 {
+                        let span = 2 * b.wander_range as u64 + 1;
+                        let dx = (rng.next_u64() % span) as i32 - b.wander_range;
+                        let dz = (rng.next_u64() % span) as i32 - b.wander_range;
+                        let goal_pos = WorldPos::new(pos.0.x + dx as f32, 0.0, pos.0.z + dz as f32);
+                        nav_goal.0 = Some(goal_pos);
+                    }
                 }
-                continue;
-            };
-            let (tx, tz) = (cx as f32 + 0.5, cz as f32 + 0.5);
-            let (dx, dz) = (tx - pos.0.x, tz - pos.0.z);
-            let dist = (dx * dx + dz * dz).sqrt();
-            if dist <= step_len {
-                pos.0 = WorldPos::new(tx, height_at(seed, tx, tz), tz);
-                vel.0 = WorldPos::default();
-                wp.pop_front();
-            } else {
-                vel.0 = WorldPos::new(dx / dist * b.speed, 0.0, dz / dist * b.speed);
-                pos.0.x += vel.0.x * TICK_DT;
-                pos.0.z += vel.0.z * TICK_DT;
-                pos.0.y = height_at(seed, pos.0.x, pos.0.z);
             }
         }
     }
@@ -1028,5 +1552,190 @@ mod tests {
         assert!(w.can_recruit_with(player, target));
         assert_eq!(w.recruit_with(player, target), Ok(()));
         assert!(w.is_player_controlled(target));
+    }
+
+    #[test]
+    fn skills_and_inventory_persist_across_tier_changes() {
+        let mut cfg = WorldConfig {
+            seed: 12345,
+            agent_count: 2,
+            ..Default::default()
+        };
+        cfg.lod = LodConfig::with_radii(30.0, 80.0);
+        let mut w = World::generate(&cfg);
+
+        // Clear player focus so we can control focus points precisely
+        w.set_player_controlled(Entity(0), false);
+        w.set_focus_points(vec![WorldPos::new(0.0, 0.0, 0.0)]);
+
+        let target = Entity(1);
+        if let Some(mut skills) = w.skills_mut(target) {
+            skills.set("swordsmanship", 25);
+            skills.set("survival", 10);
+        }
+        if let Some(mut inv) = w.inventory_mut(target) {
+            inv.add("iron_sword", 1);
+            inv.add("bread", 5);
+        }
+
+        // Active range (< 30.0)
+        w.set_position(target, WorldPos::new(10.0, 0.0, 10.0));
+        w.step();
+        assert_eq!(w.tier(target), SimTier::Active);
+        assert_eq!(w.skills(target).unwrap().get("swordsmanship"), 25);
+        assert_eq!(w.inventory(target).unwrap().count_of("bread"), 5);
+
+        // Reduced range (30.0 .. 80.0)
+        w.set_position(target, WorldPos::new(50.0, 0.0, 0.0));
+        w.step();
+        assert_eq!(w.tier(target), SimTier::Reduced);
+        assert_eq!(w.skills(target).unwrap().get("swordsmanship"), 25);
+        assert_eq!(w.inventory(target).unwrap().count_of("bread"), 5);
+
+        // Dormant range (> 80.0)
+        w.set_position(target, WorldPos::new(150.0, 0.0, 0.0));
+        w.step();
+        assert_eq!(w.tier(target), SimTier::Dormant);
+        assert_eq!(w.skills(target).unwrap().get("swordsmanship"), 25);
+        assert_eq!(w.inventory(target).unwrap().count_of("bread"), 5);
+
+        // Return to Active
+        w.set_position(target, WorldPos::new(5.0, 0.0, 5.0));
+        w.step();
+        assert_eq!(w.tier(target), SimTier::Active);
+        assert_eq!(w.skills(target).unwrap().get("swordsmanship"), 25);
+        assert_eq!(w.inventory(target).unwrap().count_of("bread"), 5);
+        assert_eq!(w.inventory(target).unwrap().count_of("iron_sword"), 1);
+    }
+
+    #[test]
+    fn simulation_lod_is_deterministic_across_identical_worlds() {
+        let mut cfg = WorldConfig {
+            seed: 42,
+            agent_count: 20,
+            ..Default::default()
+        };
+        cfg.lod = LodConfig::with_radii(20.0, 60.0);
+
+        let mut w1 = World::generate(&cfg);
+        let mut w2 = World::generate(&cfg);
+
+        w1.set_focus_points(vec![WorldPos::new(0.0, 0.0, 0.0)]);
+        w2.set_focus_points(vec![WorldPos::new(0.0, 0.0, 0.0)]);
+
+        for _ in 0..100 {
+            w1.step();
+            w2.step();
+        }
+
+        let e1: Vec<_> = w1.entities().collect();
+        let e2: Vec<_> = w2.entities().collect();
+        assert_eq!(e1, e2);
+
+        for e in e1 {
+            let p1 = w1.position(e);
+            let p2 = w2.position(e);
+            assert_eq!(p1.x.to_bits(), p2.x.to_bits());
+            assert_eq!(p1.y.to_bits(), p2.y.to_bits());
+            assert_eq!(p1.z.to_bits(), p2.z.to_bits());
+
+            assert_eq!(w1.tier(e), w2.tier(e));
+            assert_eq!(w1.npc_id(e), w2.npc_id(e));
+            assert_eq!(w1.skills(e).as_deref(), w2.skills(e).as_deref());
+            assert_eq!(w1.inventory(e).as_deref(), w2.inventory(e).as_deref());
+        }
+    }
+
+    #[test]
+    fn dormant_agent_advances_toward_goal_without_pathfinding_and_resumes() {
+        let mut cfg = WorldConfig {
+            seed: 999,
+            agent_count: 2,
+            ..Default::default()
+        };
+        cfg.lod = LodConfig::with_radii(25.0, 50.0);
+        let mut w = World::generate(&cfg);
+
+        w.set_player_controlled(Entity(0), false);
+        w.set_focus_points(vec![WorldPos::new(0.0, 0.0, 0.0)]);
+
+        let e = Entity(1);
+        // Start far outside reduced radius (150m)
+        let start_pos = WorldPos::new(150.0, 0.0, 150.0);
+        w.set_position(e, start_pos);
+        w.step();
+        assert_eq!(w.tier(e), SimTier::Dormant);
+
+        // Set distant navigation goal
+        let goal_pos = WorldPos::new(180.0, 0.0, 150.0);
+        w.set_nav_goal(e, Some(goal_pos));
+
+        // Dormant agent must not have an A* path allocated
+        assert!(!w.has_path(e));
+
+        // Advance 20 ticks
+        for _ in 0..20 {
+            w.step();
+        }
+
+        // Pos should have advanced along the X direction towards goal
+        let mid_pos = w.position(e);
+        assert!(mid_pos.x > start_pos.x);
+        assert!(!w.has_path(e)); // Still no A* path in Dormant tier
+
+        // Now move focus point to the agent to promote it to Active
+        w.set_focus_points(vec![mid_pos]);
+        w.step();
+
+        assert_eq!(w.tier(e), SimTier::Active);
+        // It cleanly resumed into active simulation
+        assert!(w.position(e).x >= mid_pos.x);
+    }
+
+    #[test]
+    fn despawn_and_resume_npc_preserves_identity_and_state() {
+        let cfg = WorldConfig {
+            seed: 777,
+            agent_count: 3,
+            ..Default::default()
+        };
+        let mut w = World::generate(&cfg);
+
+        let target = Entity(1);
+        let npc_id = w.npc_id(target).unwrap();
+        if let Some(mut skills) = w.skills_mut(target) {
+            skills.set("archery", 50);
+        }
+        if let Some(mut inv) = w.inventory_mut(target) {
+            inv.add("arrow", 30);
+            inv.add("bow", 1);
+        }
+        let pos_before = w.position(target);
+
+        // Despawn the target NPC
+        let record = w.despawn_npc(target).expect("despawn should succeed");
+        assert_eq!(record.id, npc_id);
+        assert_eq!(record.skills.get("archery"), 50);
+        assert_eq!(record.inventory.count_of("arrow"), 30);
+
+        // Double despawn returns AlreadyDespawned
+        assert_eq!(w.despawn_npc(target), Err(DespawnError::AlreadyDespawned));
+
+        // Active entities count should be 2
+        assert_eq!(w.entities().count(), 2);
+        assert!(!w.entities().any(|e| e == target));
+
+        // Resume the NPC
+        let resumed_entity = w.resume_npc(record);
+        assert_eq!(w.entities().count(), 3);
+        assert_eq!(w.npc_id(resumed_entity), Some(npc_id));
+        assert_eq!(w.skills(resumed_entity).unwrap().get("archery"), 50);
+        assert_eq!(w.inventory(resumed_entity).unwrap().count_of("arrow"), 30);
+        let pos_after = w.position(resumed_entity);
+        assert_eq!(pos_after.x.to_bits(), pos_before.x.to_bits());
+        assert_eq!(pos_after.z.to_bits(), pos_before.z.to_bits());
+
+        // Step simulation to ensure resumed entity simulates normally
+        w.step();
     }
 }
