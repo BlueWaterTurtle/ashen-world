@@ -118,10 +118,13 @@ impl App {
         self.camera.aspect = size.width as f32 / size.height as f32;
         let px_per_unit = size.height as f32 / (CHUNK_SIZE * 4.0);
         let (cx, cz) = (self.camera.position[0], self.camera.position[2]);
-        for py in 0..size.height as usize {
-            for px in 0..size.width as usize {
-                let wx = (px as f32 - size.width as f32 / 2.0) / px_per_unit + cx;
-                let wz = (py as f32 - size.height as f32 / 2.0) / px_per_unit + cz;
+        // Sample terrain once per BLOCK x BLOCK pixel block to keep the CPU cost low.
+        const BLOCK: usize = 4;
+        let (width, height) = (size.width as usize, size.height as usize);
+        for by in (0..height).step_by(BLOCK) {
+            for bx in (0..width).step_by(BLOCK) {
+                let wx = ((bx + BLOCK / 2) as f32 - width as f32 / 2.0) / px_per_unit + cx;
+                let wz = ((by + BLOCK / 2) as f32 - height as f32 / 2.0) / px_per_unit + cz;
                 let wp = WorldPos::new(wx, 0.0, wz);
                 let l = wp.local();
                 let shade = terrain
@@ -129,7 +132,10 @@ impl App {
                     .map(|t| t.height(l.x as usize, l.z as usize))
                     .map_or(0.0, |h| h / 40.0);
                 let v = (24.0 + shade * 70.0) as u32;
-                buf[py * size.width as usize + px] = (v << 16) | ((v * 9 / 10) << 8) | (v * 8 / 10);
+                let color = (v << 16) | ((v * 9 / 10) << 8) | (v * 8 / 10);
+                for py in by..(by + BLOCK).min(height) {
+                    buf[py * width + bx..py * width + (bx + BLOCK).min(width)].fill(color);
+                }
             }
         }
         for p in &self.world.positions {

@@ -40,6 +40,18 @@ pub fn height_at(seed: u64, x: f32, z: f32) -> f32 {
     (base * 0.8 + detail * 0.2) * 40.0
 }
 
+/// Maximum height difference (meters) between adjacent cells that can still be walked.
+pub const MAX_STEP_HEIGHT: f32 = 0.35;
+
+/// Whether the 1m cell is walkable: no neighbouring cell is too steep a step away.
+pub fn is_walkable(seed: u64, cell: (i32, i32)) -> bool {
+    let h = |c: (i32, i32)| height_at(seed, c.0 as f32 + 0.5, c.1 as f32 + 0.5);
+    let here = h(cell);
+    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .iter()
+        .all(|&(dx, dz)| (h((cell.0 + dx, cell.1 + dz)) - here).abs() <= MAX_STEP_HEIGHT)
+}
+
 /// Heightmap for one chunk.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkTerrain {
@@ -118,6 +130,18 @@ impl ChunkStreamer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walkability_is_deterministic_and_mixed() {
+        let cells: Vec<bool> = (0..50).map(|i| is_walkable(3, (i * 7, i * 5))).collect();
+        assert_eq!(
+            cells,
+            (0..50)
+                .map(|i| is_walkable(3, (i * 7, i * 5)))
+                .collect::<Vec<_>>()
+        );
+        assert!(cells.iter().any(|&w| w));
+    }
 
     #[test]
     fn terrain_is_deterministic_and_bounded() {
