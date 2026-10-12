@@ -14,7 +14,7 @@ pub fn find_path(
     start: Cell,
     goal: Cell,
     max_expansions: usize,
-    passable: impl Fn(Cell) -> bool,
+    mut passable: impl FnMut(Cell) -> bool,
 ) -> Option<Vec<Cell>> {
     if !passable(start) || !passable(goal) {
         return None;

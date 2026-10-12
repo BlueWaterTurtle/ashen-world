@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use camera::Camera;
-use core_sim::{height_at, Behavior, Entity, World, WorldConfig, TICK_DT};
+use core_sim::{height_at, Behavior, World, WorldConfig, WorldPos, TICK_DT};
+use glam::{Mat4, Vec3, Vec4};
 use renderer::{AgentInstance, Renderer};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -25,6 +26,39 @@ const PALETTE: [[f32; 4]; 4] = [
     [0.35, 0.65, 0.85, 1.0],
     [0.55, 0.80, 0.45, 1.0],
 ];
+const AGENT_CULL_RADIUS: f32 = 1.0;
+
+fn agent_in_frustum(position: WorldPos, view_proj: Mat4) -> bool {
+    let center = Vec3::new(position.x, position.y + 0.9, position.z);
+    let x = Vec4::new(
+        view_proj.x_axis.x,
+        view_proj.y_axis.x,
+        view_proj.z_axis.x,
+        view_proj.w_axis.x,
+    );
+    let y = Vec4::new(
+        view_proj.x_axis.y,
+        view_proj.y_axis.y,
+        view_proj.z_axis.y,
+        view_proj.w_axis.y,
+    );
+    let z = Vec4::new(
+        view_proj.x_axis.z,
+        view_proj.y_axis.z,
+        view_proj.z_axis.z,
+        view_proj.w_axis.z,
+    );
+    let w = Vec4::new(
+        view_proj.x_axis.w,
+        view_proj.y_axis.w,
+        view_proj.z_axis.w,
+        view_proj.w_axis.w,
+    );
+    [w + x, w - x, w + y, w - y, z, w - z].iter().all(|plane| {
+        let normal = plane.truncate();
+        normal.dot(center) + plane.w >= -AGENT_CULL_RADIUS * normal.length()
+    })
+}
 
 #[derive(Default)]
 struct Input {
@@ -51,6 +85,7 @@ struct App {
     stats: Stats,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    agent_instances: Vec<AgentInstance>,
 }
 
 impl App {
@@ -69,6 +104,7 @@ impl App {
             },
             window: None,
             renderer: None,
+            agent_instances: Vec::new(),
         }
     }
 
@@ -97,19 +133,20 @@ impl App {
             let t = self.camera.target;
             let center = core_sim::WorldPos::new(t.x, 0.0, t.z).chunk();
             r.update_chunks(center, VIEW_RADIUS_CHUNKS);
-            let agents: Vec<AgentInstance> = self
-                .world
-                .entities()
-                .map(|e: Entity| {
-                    let p = self.world.position(e);
+            let view_proj = self.camera.view_proj();
+            self.agent_instances.clear();
+            for e in self.world.entities() {
+                let p = self.world.position(e);
+                let position = WorldPos::new(p.x, height_at(seed, p.x, p.z), p.z);
+                if agent_in_frustum(position, view_proj) {
                     let c = PALETTE[self.world.behavior_of(e) % PALETTE.len()];
-                    AgentInstance {
-                        pos: [p.x, height_at(seed, p.x, p.z), p.z, 0.0],
+                    self.agent_instances.push(AgentInstance {
+                        pos: [position.x, position.y, position.z, 0.0],
                         color: c,
-                    }
-                })
-                .collect();
-            match r.render(&self.camera, &agents) {
+                    });
+                }
+            }
+            match r.render(&self.camera, &self.agent_instances) {
                 Ok(()) => {}
                 Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                     if let Some(w) = &self.window {
@@ -285,5 +322,25 @@ fn main() {
     let mut app = App::new(world);
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop error: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_frustum_culling_keeps_visible_and_discards_distant_agents() {
+        let camera = Camera::default();
+        let view_proj = camera.view_proj();
+        let target = camera.target;
+        assert!(agent_in_frustum(
+            WorldPos::new(target.x, target.y, target.z),
+            view_proj
+        ));
+        assert!(!agent_in_frustum(
+            WorldPos::new(target.x + 100_000.0, target.y, target.z),
+            view_proj
+        ));
     }
 }
