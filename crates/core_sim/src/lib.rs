@@ -18,4 +18,7 @@ pub use clock::GameClock;
 pub use path::{find_path, Cell};
 pub use rng::Rng;
 pub use terrain::{height_at, is_walkable, ChunkStreamer, ChunkTerrain};
-pub use world::{Entity, World, WorldConfig, TICKS_PER_SECOND, TICK_DT};
+pub use world::{
+    ControlError, Entity, PlayerControlled, RecruitError, Recruitable, World, WorldConfig,
+    RECRUIT_MAX_DISTANCE, TICKS_PER_SECOND, TICK_DT,
+};

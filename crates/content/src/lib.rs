@@ -24,6 +24,9 @@ pub struct UnitArchetype {
     pub race: String,
     /// Id of a [`Behavior`].
     pub behavior: String,
+    /// Whether this unit archetype can be recruited into player control.
+    #[serde(default)]
+    pub recruitable: bool,
 }
 
 /// A modification to a named stat: `(base + flat) * (1 + percent)`.
@@ -321,6 +324,13 @@ mod tests {
         assert!(!c.factions.is_empty());
         assert!(!c.units.is_empty());
         assert!(!c.biomes.is_empty());
+
+        let wanderer = c.units.iter().find(|u| u.id == "wanderer").unwrap();
+        let raider = c.units.iter().find(|u| u.id == "raider").unwrap();
+        let sentry = c.units.iter().find(|u| u.id == "sentry").unwrap();
+        assert!(wanderer.recruitable);
+        assert!(!raider.recruitable);
+        assert!(!sentry.recruitable);
     }
 
     #[test]

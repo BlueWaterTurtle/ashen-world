@@ -1,5 +1,5 @@
 [
-  { "id": "wanderer", "name": "Wanderer", "faction": "wanderers", "max_health": 100.0, "move_speed": 3.0, "race": "human", "behavior": "wander_far" },
-  { "id": "raider", "name": "Raider", "faction": "raiders", "max_health": 120.0, "move_speed": 3.5, "race": "brute", "behavior": "wander_near" },
-  { "id": "sentry", "name": "Sentry", "faction": "wanderers", "max_health": 110.0, "move_speed": 3.0, "race": "human", "behavior": "stationary" }
+  { "id": "wanderer", "name": "Wanderer", "faction": "wanderers", "max_health": 100.0, "move_speed": 3.0, "race": "human", "behavior": "wander_far", "recruitable": true },
+  { "id": "raider", "name": "Raider", "faction": "raiders", "max_health": 120.0, "move_speed": 3.5, "race": "brute", "behavior": "wander_near", "recruitable": false },
+  { "id": "sentry", "name": "Sentry", "faction": "wanderers", "max_health": 110.0, "move_speed": 3.0, "race": "human", "behavior": "stationary", "recruitable": false }
 ]
