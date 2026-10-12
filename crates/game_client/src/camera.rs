@@ -67,11 +67,58 @@ impl Camera {
         let rgt = Vec3::new(cy, 0.0, -sy);
         self.target += rgt * right + fwd * forward;
     }
+
+    /// Cast a ray from screen pixel coordinates into world space.
+    pub fn screen_ray(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+        width: f32,
+        height: f32,
+    ) -> (Vec3, Vec3) {
+        let ndc_x = (2.0 * screen_x / width) - 1.0;
+        let ndc_y = 1.0 - (2.0 * screen_y / height);
+        let inv_view_proj = self.view_proj().inverse();
+        let near = inv_view_proj.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
+        let far = inv_view_proj.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
+        let dir = (far - near).normalize();
+        (near, dir)
+    }
+
+    /// Intersect a screen pixel ray with a horizontal ground plane `y = y_plane`.
+    pub fn ground_intersection(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+        width: f32,
+        height: f32,
+        y_plane: f32,
+    ) -> Option<Vec3> {
+        let (origin, dir) = self.screen_ray(screen_x, screen_y, width, height);
+        if dir.y.abs() < 1e-6 {
+            return None;
+        }
+        let t = (y_plane - origin.y) / dir.y;
+        if t < 0.0 {
+            return None;
+        }
+        Some(origin + dir * t)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_center_ray_intersects_ground_near_target() {
+        let c = Camera::default();
+        let hit = c
+            .ground_intersection(400.0, 300.0, 800.0, 600.0, c.target.y)
+            .expect("center ray hits ground plane");
+        assert!((hit.x - c.target.x).abs() < 1e-2, "hit.x = {}", hit.x);
+        assert!((hit.z - c.target.z).abs() < 1e-2, "hit.z = {}", hit.z);
+    }
 
     #[test]
     fn eye_is_at_orbit_distance() {

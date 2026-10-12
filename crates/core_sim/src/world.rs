@@ -30,6 +30,59 @@ pub struct BehaviorId(pub usize);
 /// Ticks remaining before an idle agent may pick a new destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Pause(pub u32);
+/// Whether this agent is currently controlled by the player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlayerControlled(pub bool);
+/// Whether an agent may be recruited into player control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Recruitable(pub bool);
+
+/// Maximum distance (in meters) for character-to-character recruitment.
+pub const RECRUIT_MAX_DISTANCE: f32 = 8.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlError {
+    NotFound,
+    NotControllable,
+    NoCharacterSelected,
+}
+
+impl std::fmt::Display for ControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "entity not found"),
+            Self::NotControllable => write!(f, "entity is not controllable by player"),
+            Self::NoCharacterSelected => write!(f, "no player character currently selected"),
+        }
+    }
+}
+
+impl std::error::Error for ControlError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecruitError {
+    NotFound,
+    AlreadyControlled,
+    NotRecruitable,
+    RecruiterNotControlled,
+    OutOfRange,
+}
+
+impl std::fmt::Display for RecruitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "target entity not found"),
+            Self::AlreadyControlled => write!(f, "target is already a player character"),
+            Self::NotRecruitable => write!(f, "target character is not recruitable"),
+            Self::RecruiterNotControlled => {
+                write!(f, "recruiting character is not controlled by player")
+            }
+            Self::OutOfRange => write!(f, "target is out of recruitment interaction range"),
+        }
+    }
+}
+
+impl std::error::Error for RecruitError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorldConfig {
@@ -41,6 +94,8 @@ pub struct WorldConfig {
     pub behaviors: Vec<Behavior>,
     /// Maximum number of path requests served per tick (bounds A* cost).
     pub max_path_requests_per_tick: usize,
+    /// Number of starting characters controlled by the player (default: 1).
+    pub starting_player_characters: usize,
 }
 
 impl Default for WorldConfig {
@@ -51,6 +106,7 @@ impl Default for WorldConfig {
             chunk_radius: 2,
             behaviors: vec![Behavior::default()],
             max_path_requests_per_tick: 8,
+            starting_player_characters: 1,
         }
     }
 }
@@ -67,6 +123,8 @@ pub struct World {
     walkability_cache: WalkabilityCache,
     /// Round-robin cursor so every idle agent eventually gets a path request.
     wander_cursor: usize,
+    /// The currently selected player character, if any.
+    pub selected_player_character: Option<Entity>,
 }
 
 /// Maximum A* node expansions per path request.
@@ -88,6 +146,7 @@ impl World {
         let mut ecs = hecs::World::new();
         let mut ids = Vec::with_capacity(config.agent_count);
         let mut walkability_cache = WalkabilityCache::default();
+        let starting_players = config.starting_player_characters.min(config.agent_count);
         for i in 0..config.agent_count {
             let pos = loop {
                 let cx = (rng.next_u64() % side) as i32 - r;
@@ -104,14 +163,24 @@ impl World {
                     break WorldPos::new(pos.x, y, pos.z);
                 }
             };
+            let bid = i % behaviors.len();
+            let is_player = i < starting_players;
+            let is_recruitable = !is_player && behaviors[bid].recruitable;
             ids.push(ecs.spawn((
                 Position(pos),
                 Velocity::default(),
                 Path::default(),
-                BehaviorId(i % behaviors.len()),
+                BehaviorId(bid),
                 Pause::default(),
+                PlayerControlled(is_player),
+                Recruitable(is_recruitable),
             )));
         }
+        let selected_player_character = if starting_players > 0 {
+            Some(Entity(0))
+        } else {
+            None
+        };
         Self {
             seed: config.seed,
             tick: 0,
@@ -122,6 +191,7 @@ impl World {
             rng,
             walkability_cache,
             wander_cursor: 0,
+            selected_player_character,
         }
     }
 
@@ -231,7 +301,11 @@ impl World {
             self.wander_cursor = (self.wander_cursor + 1) % n;
             let e = Entity(i as u32);
             let r = self.behaviors[self.behavior_of(e)].wander_range;
-            if self.is_navigating(e) || self.pause_of(e) > 0 || r == 0 {
+            if self.is_player_controlled(e)
+                || self.is_navigating(e)
+                || self.pause_of(e) > 0
+                || r == 0
+            {
                 continue;
             }
             requests += 1;
@@ -288,6 +362,174 @@ impl World {
                 pos.0.y = height_at(seed, pos.0.x, pos.0.z);
             }
         }
+    }
+
+    pub fn is_player_controlled(&self, e: Entity) -> bool {
+        if e.0 as usize >= self.ids.len() {
+            return false;
+        }
+        self.ecs
+            .get::<&PlayerControlled>(self.ids[e.0 as usize])
+            .map(|p| p.0)
+            .unwrap_or(false)
+    }
+
+    /// Whether this entity is controllable by the player. Uncontrollable characters
+    /// cannot receive player commands.
+    pub fn is_controllable(&self, e: Entity) -> bool {
+        self.is_player_controlled(e)
+    }
+
+    pub fn set_player_controlled(&mut self, e: Entity, controlled: bool) {
+        if (e.0 as usize) < self.ids.len() {
+            if let Ok(mut c) = self
+                .ecs
+                .get::<&mut PlayerControlled>(self.ids[e.0 as usize])
+            {
+                c.0 = controlled;
+            }
+        }
+    }
+
+    pub fn is_recruitable(&self, e: Entity) -> bool {
+        if e.0 as usize >= self.ids.len() {
+            return false;
+        }
+        if self.is_player_controlled(e) {
+            return false;
+        }
+        self.ecs
+            .get::<&Recruitable>(self.ids[e.0 as usize])
+            .map(|r| r.0)
+            .unwrap_or(false)
+    }
+
+    pub fn set_recruitable(&mut self, e: Entity, recruitable: bool) {
+        if (e.0 as usize) < self.ids.len() {
+            if let Ok(mut c) = self.ecs.get::<&mut Recruitable>(self.ids[e.0 as usize]) {
+                c.0 = recruitable;
+            }
+        }
+    }
+
+    /// All player-controlled characters in spawn order.
+    pub fn player_characters(&self) -> impl Iterator<Item = Entity> + '_ {
+        (0..self.ids.len() as u32)
+            .map(Entity)
+            .filter(|&e| self.is_player_controlled(e))
+    }
+
+    /// Total count of currently player-controlled characters.
+    pub fn player_character_count(&self) -> usize {
+        self.player_characters().count()
+    }
+
+    pub fn selected_character(&self) -> Option<Entity> {
+        self.selected_player_character
+    }
+
+    pub fn select_character(&mut self, e: Entity) -> Result<(), ControlError> {
+        if e.0 as usize >= self.ids.len() {
+            return Err(ControlError::NotFound);
+        }
+        if !self.is_player_controlled(e) {
+            return Err(ControlError::NotControllable);
+        }
+        self.selected_player_character = Some(e);
+        Ok(())
+    }
+
+    /// Issue a move command to a player-controlled character. Returns `Err(ControlError::NotControllable)`
+    /// if the character is uncontrollable.
+    pub fn command_move(&mut self, e: Entity, goal: WorldPos) -> Result<bool, ControlError> {
+        if e.0 as usize >= self.ids.len() {
+            return Err(ControlError::NotFound);
+        }
+        if !self.is_player_controlled(e) {
+            return Err(ControlError::NotControllable);
+        }
+        Ok(self.navigate_to(e, goal))
+    }
+
+    /// Issue a move command to the currently selected player character.
+    pub fn command_move_selected(&mut self, goal: WorldPos) -> Result<bool, ControlError> {
+        let selected = self
+            .selected_player_character
+            .ok_or(ControlError::NoCharacterSelected)?;
+        self.command_move(selected, goal)
+    }
+
+    /// Check if target can be recruited.
+    pub fn can_recruit(&self, target: Entity) -> bool {
+        self.is_recruitable(target)
+    }
+
+    /// Check if target can be recruited by the given recruiter character.
+    pub fn can_recruit_with(&self, recruiter: Entity, target: Entity) -> bool {
+        if !self.is_player_controlled(recruiter) {
+            return false;
+        }
+        if !self.can_recruit(target) {
+            return false;
+        }
+        let rp = self.position(recruiter);
+        let tp = self.position(target);
+        let dx = rp.x - tp.x;
+        let dz = rp.z - tp.z;
+        (dx * dx + dz * dz) <= RECRUIT_MAX_DISTANCE * RECRUIT_MAX_DISTANCE
+    }
+
+    /// Recruit a character into player control. The target must exist and be recruitable.
+    pub fn recruit(&mut self, target: Entity) -> Result<(), RecruitError> {
+        if target.0 as usize >= self.ids.len() {
+            return Err(RecruitError::NotFound);
+        }
+        if self.is_player_controlled(target) {
+            return Err(RecruitError::AlreadyControlled);
+        }
+        if !self.is_recruitable(target) {
+            return Err(RecruitError::NotRecruitable);
+        }
+        let id = self.ids[target.0 as usize];
+        if let Ok(mut pc) = self.ecs.get::<&mut PlayerControlled>(id) {
+            pc.0 = true;
+        }
+        if let Ok(mut rc) = self.ecs.get::<&mut Recruitable>(id) {
+            rc.0 = false;
+        }
+        // Stop any current wander path / pause so the new recruit is immediately ready for orders.
+        if let Ok(mut path) = self.ecs.get::<&mut Path>(id) {
+            path.0 = None;
+        }
+        if let Ok(mut pause) = self.ecs.get::<&mut Pause>(id) {
+            pause.0 = 0;
+        }
+        if let Ok(mut vel) = self.ecs.get::<&mut Velocity>(id) {
+            vel.0 = WorldPos::default();
+        }
+        if self.selected_player_character.is_none() {
+            self.selected_player_character = Some(target);
+        }
+        Ok(())
+    }
+
+    /// Recruit a character into player control using a specific player character as recruiter.
+    /// Requires recruiter to be player-controlled and within `RECRUIT_MAX_DISTANCE` of target.
+    pub fn recruit_with(&mut self, recruiter: Entity, target: Entity) -> Result<(), RecruitError> {
+        if recruiter.0 as usize >= self.ids.len() || !self.is_player_controlled(recruiter) {
+            return Err(RecruitError::RecruiterNotControlled);
+        }
+        if target.0 as usize >= self.ids.len() {
+            return Err(RecruitError::NotFound);
+        }
+        let rp = self.position(recruiter);
+        let tp = self.position(target);
+        let dx = rp.x - tp.x;
+        let dz = rp.z - tp.z;
+        if (dx * dx + dz * dz) > RECRUIT_MAX_DISTANCE * RECRUIT_MAX_DISTANCE {
+            return Err(RecruitError::OutOfRange);
+        }
+        self.recruit(target)
     }
 
     pub fn run_ticks(&mut self, n: u64) {
@@ -475,6 +717,29 @@ mod tests {
     }
 
     #[test]
+    fn player_starts_with_single_character_and_others_are_uncontrollable() {
+        let c = WorldConfig {
+            seed: 123,
+            agent_count: 50,
+            ..Default::default()
+        };
+        let mut w = World::generate(&c);
+        assert_eq!(w.player_character_count(), 1);
+        assert_eq!(w.selected_character(), Some(Entity(0)));
+        assert!(w.is_player_controlled(Entity(0)));
+        assert!(w.is_controllable(Entity(0)));
+
+        for e in w.entities().skip(1) {
+            assert!(!w.is_player_controlled(e));
+            assert!(!w.is_controllable(e));
+            assert_eq!(
+                w.command_move(e, WorldPos::new(10.0, 0.0, 10.0)),
+                Err(ControlError::NotControllable)
+            );
+        }
+    }
+
+    #[test]
     fn agents_spawn_on_walkable_cells() {
         for seed in [1, 42, 999] {
             let c = WorldConfig {
@@ -544,7 +809,10 @@ mod tests {
         };
         let mut w = World::generate(&c);
         w.step();
-        let failed_agents: Vec<_> = w.entities().filter(|&e| !w.is_navigating(e)).collect();
+        let failed_agents: Vec<_> = w
+            .entities()
+            .filter(|&e| !w.is_player_controlled(e) && !w.is_navigating(e))
+            .collect();
         assert!(
             !failed_agents.is_empty(),
             "expected some wander requests to fail"
@@ -552,5 +820,107 @@ mod tests {
         for e in failed_agents {
             assert_eq!(w.pause_of(e), WANDER_BACKOFF_TICKS - 1);
         }
+    }
+
+    #[test]
+    fn player_characters_do_not_wander_autonomously() {
+        let c = WorldConfig {
+            seed: 7,
+            agent_count: 20,
+            behaviors: vec![Behavior::from_seconds(30, 0.0, 0.0, 3.0)],
+            ..Default::default()
+        };
+        let mut w = World::generate(&c);
+        let player_start = w.position(Entity(0));
+        let npc_starts: Vec<_> = w.entities().skip(1).map(|e| w.position(e)).collect();
+
+        w.run_ticks(TICKS_PER_SECOND as u64 * 10);
+
+        // Player character stayed in place
+        assert_eq!(w.position(Entity(0)), player_start);
+
+        // At least some NPCs moved from autonomous wandering
+        let npc_current: Vec<_> = w.entities().skip(1).map(|e| w.position(e)).collect();
+        assert_ne!(npc_starts, npc_current);
+    }
+
+    #[test]
+    fn recruitment_converts_npc_to_player_control() {
+        let c = WorldConfig {
+            seed: 42,
+            agent_count: 5,
+            behaviors: vec![
+                Behavior::from_seconds(0, 0.0, 0.0, 3.0).with_recruitable(true),
+                Behavior::from_seconds(0, 0.0, 0.0, 3.0).with_recruitable(false),
+            ],
+            ..Default::default()
+        };
+        let mut w = World::generate(&c);
+
+        let recruitable_npc = Entity(2); // 2 % 2 == 0 -> recruitable
+        let unrecruitable_npc = Entity(1); // 1 % 2 == 1 -> not recruitable
+
+        assert!(w.is_recruitable(recruitable_npc));
+        assert!(!w.is_recruitable(unrecruitable_npc));
+
+        // Attempting to recruit unrecruitable fails
+        assert_eq!(
+            w.recruit(unrecruitable_npc),
+            Err(RecruitError::NotRecruitable)
+        );
+        assert!(!w.is_player_controlled(unrecruitable_npc));
+
+        // Recruiting recruitable succeeds
+        assert_eq!(w.recruit(recruitable_npc), Ok(()));
+        assert!(w.is_player_controlled(recruitable_npc));
+        assert_eq!(w.player_character_count(), 2);
+        assert!(!w.is_recruitable(recruitable_npc));
+
+        // Cannot recruit already controlled character
+        assert_eq!(
+            w.recruit(recruitable_npc),
+            Err(RecruitError::AlreadyControlled)
+        );
+
+        // Now newly recruited character can receive player commands
+        assert!(w.select_character(recruitable_npc).is_ok());
+        assert_eq!(w.selected_character(), Some(recruitable_npc));
+    }
+
+    #[test]
+    fn recruit_with_enforces_distance_and_recruiter_status() {
+        let c = WorldConfig {
+            seed: 99,
+            agent_count: 3,
+            behaviors: vec![Behavior::from_seconds(0, 0.0, 0.0, 3.0).with_recruitable(true)],
+            ..Default::default()
+        };
+        let mut w = World::generate(&c);
+        let player = Entity(0);
+        let target = Entity(1);
+        let other_npc = Entity(2);
+
+        // Put player at origin and target far away
+        w.set_position(player, WorldPos::new(0.0, 0.0, 0.0));
+        w.set_position(target, WorldPos::new(50.0, 0.0, 50.0));
+
+        // Out of range
+        assert!(!w.can_recruit_with(player, target));
+        assert_eq!(
+            w.recruit_with(player, target),
+            Err(RecruitError::OutOfRange)
+        );
+
+        // Non-player character cannot act as recruiter
+        assert_eq!(
+            w.recruit_with(other_npc, target),
+            Err(RecruitError::RecruiterNotControlled)
+        );
+
+        // Move target close to player (within RECRUIT_MAX_DISTANCE = 8.0)
+        w.set_position(target, WorldPos::new(3.0, 0.0, 2.0));
+        assert!(w.can_recruit_with(player, target));
+        assert_eq!(w.recruit_with(player, target), Ok(()));
+        assert!(w.is_player_controlled(target));
     }
 }

@@ -138,7 +138,13 @@ impl App {
             for e in self.world.entities() {
                 let position = self.world.position(e);
                 if agent_in_frustum(position, view_proj) {
-                    let c = PALETTE[self.world.behavior_of(e) % PALETTE.len()];
+                    let c = if self.world.selected_character() == Some(e) {
+                        [0.2, 0.95, 0.35, 1.0]
+                    } else if self.world.is_player_controlled(e) {
+                        [0.15, 0.70, 0.30, 1.0]
+                    } else {
+                        PALETTE[self.world.behavior_of(e) % PALETTE.len()]
+                    };
                     self.agent_instances.push(AgentInstance {
                         pos: [position.x, position.y, position.z, 0.0],
                         color: c,
@@ -163,10 +169,11 @@ impl App {
         if elapsed >= Duration::from_secs(1) {
             let secs = elapsed.as_secs_f32();
             let line = format!(
-                "frame {:.2} ms | sim {:.1} ticks/s | entities {} | chunks {}",
+                "frame {:.2} ms | sim {:.1} ticks/s | entities {} | player characters {} | chunks {}",
                 1000.0 * secs / self.stats.frames as f32,
                 self.stats.ticks as f32 / secs,
                 self.world.entity_count(),
+                self.world.player_character_count(),
                 self.renderer.as_ref().map_or(0, Renderer::loaded_chunks),
             );
             println!("{line}");
@@ -225,6 +232,51 @@ impl ApplicationHandler for App {
                         KeyCode::KeyS | KeyCode::ArrowDown => self.input.back = down,
                         KeyCode::KeyQ if down => self.camera.orbit(-0.2, 0.0),
                         KeyCode::KeyE if down => self.camera.orbit(0.2, 0.0),
+                        KeyCode::Digit1 if down => {
+                            let players: Vec<_> = self.world.player_characters().collect();
+                            if let Some(&p) = players.first() {
+                                let _ = self.world.select_character(p);
+                            }
+                        }
+                        KeyCode::Digit2 if down => {
+                            let players: Vec<_> = self.world.player_characters().collect();
+                            if let Some(&p) = players.get(1) {
+                                let _ = self.world.select_character(p);
+                            }
+                        }
+                        KeyCode::Digit3 if down => {
+                            let players: Vec<_> = self.world.player_characters().collect();
+                            if let Some(&p) = players.get(2) {
+                                let _ = self.world.select_character(p);
+                            }
+                        }
+                        KeyCode::Space if down => {
+                            if let Some(selected) = self.world.selected_character() {
+                                let p = self.world.position(selected);
+                                self.camera.target =
+                                    Vec3::new(p.x, height_at(self.world.seed, p.x, p.z), p.z);
+                            }
+                        }
+                        KeyCode::KeyR if down => {
+                            if let Some(recruiter) = self.world.selected_character() {
+                                let rp = self.world.position(recruiter);
+                                let mut nearest: Option<(core_sim::Entity, f32)> = None;
+                                for e in self.world.entities() {
+                                    if self.world.is_recruitable(e) {
+                                        let ep = self.world.position(e);
+                                        let dist_sq = (rp.x - ep.x).powi(2) + (rp.z - ep.z).powi(2);
+                                        if dist_sq <= core_sim::RECRUIT_MAX_DISTANCE.powi(2)
+                                            && nearest.is_none_or(|(_, d)| dist_sq < d)
+                                        {
+                                            nearest = Some((e, dist_sq));
+                                        }
+                                    }
+                                }
+                                if let Some((target, _)) = nearest {
+                                    let _ = self.world.recruit_with(recruiter, target);
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -233,6 +285,49 @@ impl ApplicationHandler for App {
                 if button == MouseButton::Right || button == MouseButton::Middle {
                     self.input.orbiting = state == ElementState::Pressed;
                     self.input.last_cursor = None;
+                } else if button == MouseButton::Left && state == ElementState::Pressed {
+                    if let Some((cx, cy)) = self.input.last_cursor {
+                        if let Some(w) = &self.window {
+                            let size = w.inner_size();
+                            if size.width > 0 && size.height > 0 {
+                                if let Some(ground) = self.camera.ground_intersection(
+                                    cx as f32,
+                                    cy as f32,
+                                    size.width as f32,
+                                    size.height as f32,
+                                    self.camera.target.y,
+                                ) {
+                                    let mut clicked_entity = None;
+                                    for e in self.world.entities() {
+                                        let p = self.world.position(e);
+                                        let dist = ((p.x - ground.x).powi(2)
+                                            + (p.z - ground.z).powi(2))
+                                        .sqrt();
+                                        if dist <= 1.5 {
+                                            clicked_entity = Some(e);
+                                            break;
+                                        }
+                                    }
+                                    if let Some(e) = clicked_entity {
+                                        if self.world.is_player_controlled(e) {
+                                            let _ = self.world.select_character(e);
+                                        } else if self.world.is_recruitable(e) {
+                                            if let Some(recruiter) = self.world.selected_character()
+                                            {
+                                                if self.world.can_recruit_with(recruiter, e) {
+                                                    let _ = self.world.recruit_with(recruiter, e);
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        let _ = self.world.command_move_selected(WorldPos::new(
+                                            ground.x, 0.0, ground.z,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -263,19 +358,22 @@ impl ApplicationHandler for App {
 }
 
 /// One sim behaviour per unit archetype: the archetype's behaviour definition, with
-/// its speed scaled from the archetype's `move_speed`.
+/// its speed scaled from the archetype's `move_speed` and recruitability mapped from archetype.
 fn behaviors_from_content(c: &content::Content) -> Vec<Behavior> {
     let behaviors: Vec<Behavior> = c
         .units
         .iter()
         .filter_map(|u| {
             let b = c.behaviors.iter().find(|b| b.id == u.behavior)?;
-            Some(Behavior::from_seconds(
-                b.wander_range,
-                b.pause_seconds_min,
-                b.pause_seconds_max,
-                u.move_speed * b.speed_multiplier,
-            ))
+            Some(
+                Behavior::from_seconds(
+                    b.wander_range,
+                    b.pause_seconds_min,
+                    b.pause_seconds_max,
+                    u.move_speed * b.speed_multiplier,
+                )
+                .with_recruitable(u.recruitable),
+            )
         })
         .collect();
     if behaviors.is_empty() {

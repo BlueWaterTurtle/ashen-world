@@ -10,6 +10,8 @@ pub struct Behavior {
     pub pause_ticks_max: u32,
     /// Walking speed in meters per second.
     pub speed: f32,
+    /// Whether an agent with this behaviour can be recruited into player control.
+    pub recruitable: bool,
 }
 
 impl Behavior {
@@ -21,7 +23,13 @@ impl Behavior {
             pause_ticks_min: min,
             pause_ticks_max: max.max(min),
             speed: speed.max(0.0),
+            recruitable: true,
         }
+    }
+
+    pub fn with_recruitable(mut self, recruitable: bool) -> Self {
+        self.recruitable = recruitable;
+        self
     }
 }
 
