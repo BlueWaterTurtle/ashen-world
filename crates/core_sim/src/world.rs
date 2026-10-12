@@ -129,6 +129,8 @@ pub struct World {
 
 /// Maximum A* node expansions per path request.
 pub const PATH_BUDGET: usize = 20_000;
+/// Pause ticks applied to an agent when a wander path request fails.
+pub const WANDER_BACKOFF_TICKS: u32 = 15;
 
 impl World {
     /// Deterministically generate a world from the config.
@@ -143,16 +145,24 @@ impl World {
         };
         let mut ecs = hecs::World::new();
         let mut ids = Vec::with_capacity(config.agent_count);
+        let mut walkability_cache = WalkabilityCache::default();
         let starting_players = config.starting_player_characters.min(config.agent_count);
         for i in 0..config.agent_count {
-            let cx = (rng.next_u64() % side) as i32 - r;
-            let cz = (rng.next_u64() % side) as i32 - r;
-            let local = WorldPos::new(
-                rng.range_f32(0.0, CHUNK_SIZE),
-                0.0,
-                rng.range_f32(0.0, CHUNK_SIZE),
-            );
-            let pos = WorldPos::from_chunk_local(ChunkCoord::new(cx, cz), local);
+            let pos = loop {
+                let cx = (rng.next_u64() % side) as i32 - r;
+                let cz = (rng.next_u64() % side) as i32 - r;
+                let local = WorldPos::new(
+                    rng.range_f32(0.0, CHUNK_SIZE),
+                    0.0,
+                    rng.range_f32(0.0, CHUNK_SIZE),
+                );
+                let pos = WorldPos::from_chunk_local(ChunkCoord::new(cx, cz), local);
+                let cell = (pos.x.floor() as i32, pos.z.floor() as i32);
+                if walkability_cache.is_walkable(config.seed, cell) {
+                    let y = height_at(config.seed, pos.x, pos.z);
+                    break WorldPos::new(pos.x, y, pos.z);
+                }
+            };
             let bid = i % behaviors.len();
             let is_player = i < starting_players;
             let is_recruitable = !is_player && behaviors[bid].recruitable;
@@ -179,7 +189,7 @@ impl World {
             behaviors,
             max_path_requests_per_tick: config.max_path_requests_per_tick,
             rng,
-            walkability_cache: WalkabilityCache::default(),
+            walkability_cache,
             wander_cursor: 0,
             selected_player_character,
         }
@@ -235,6 +245,12 @@ impl World {
             .get::<&Pause>(self.ids[e.0 as usize])
             .map(|p| p.0)
             .unwrap_or(0)
+    }
+
+    pub fn set_pause(&mut self, e: Entity, ticks: u32) {
+        if let Ok(mut p) = self.ecs.get::<&mut Pause>(self.ids[e.0 as usize]) {
+            p.0 = ticks;
+        }
     }
 
     /// Number of agents currently following a path.
@@ -297,7 +313,9 @@ impl World {
             let dx = (self.rng.next_u64() % span) as i32 - r;
             let dz = (self.rng.next_u64() % span) as i32 - r;
             let p = self.position(e);
-            self.navigate_to(e, WorldPos::new(p.x + dx as f32, 0.0, p.z + dz as f32));
+            if !self.navigate_to(e, WorldPos::new(p.x + dx as f32, 0.0, p.z + dz as f32)) {
+                self.set_pause(e, WANDER_BACKOFF_TICKS);
+            }
         }
     }
 
@@ -341,6 +359,7 @@ impl World {
                 vel.0 = WorldPos::new(dx / dist * b.speed, 0.0, dz / dist * b.speed);
                 pos.0.x += vel.0.x * TICK_DT;
                 pos.0.z += vel.0.z * TICK_DT;
+                pos.0.y = height_at(seed, pos.0.x, pos.0.z);
             }
         }
     }
@@ -717,6 +736,89 @@ mod tests {
                 w.command_move(e, WorldPos::new(10.0, 0.0, 10.0)),
                 Err(ControlError::NotControllable)
             );
+        }
+    }
+
+    #[test]
+    fn agents_spawn_on_walkable_cells() {
+        for seed in [1, 42, 999] {
+            let c = WorldConfig {
+                seed,
+                agent_count: 100,
+                ..Default::default()
+            };
+            let w = World::generate(&c);
+            for e in w.entities() {
+                let p = w.position(e);
+                let cell = (p.x.floor() as i32, p.z.floor() as i32);
+                assert!(
+                    is_walkable(w.seed, cell),
+                    "agent {:?} spawned at non-walkable cell {:?}",
+                    e,
+                    cell
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_y_matches_terrain_height_at_spawn_and_during_movement() {
+        let c = WorldConfig {
+            seed: 42,
+            agent_count: 10,
+            ..Default::default()
+        };
+        let mut w = World::generate(&c);
+        for e in w.entities() {
+            let p = w.position(e);
+            assert!(
+                (p.y - height_at(w.seed, p.x, p.z)).abs() < 1e-4,
+                "spawn height mismatch: pos.y = {}, expected = {}",
+                p.y,
+                height_at(w.seed, p.x, p.z)
+            );
+        }
+
+        let e = Entity(0);
+        let id = w.ids[0];
+        let p = w.position(e);
+        let start_cell = (p.x.floor() as i32, p.z.floor() as i32);
+        let waypoints: VecDeque<Cell> =
+            (1..=10).map(|i| (start_cell.0 + i, start_cell.1)).collect();
+        w.ecs.get::<&mut Path>(id).unwrap().0 = Some(waypoints);
+
+        for _ in 0..60 {
+            w.step();
+            let p = w.position(e);
+            assert!(
+                (p.y - height_at(w.seed, p.x, p.z)).abs() < 1e-4,
+                "movement height mismatch: pos.y = {}, expected = {}",
+                p.y,
+                height_at(w.seed, p.x, p.z)
+            );
+        }
+    }
+
+    #[test]
+    fn failed_wander_goal_backs_off() {
+        let c = WorldConfig {
+            seed: 42,
+            agent_count: 50,
+            max_path_requests_per_tick: 50,
+            ..Default::default()
+        };
+        let mut w = World::generate(&c);
+        w.step();
+        let failed_agents: Vec<_> = w
+            .entities()
+            .filter(|&e| !w.is_player_controlled(e) && !w.is_navigating(e))
+            .collect();
+        assert!(
+            !failed_agents.is_empty(),
+            "expected some wander requests to fail"
+        );
+        for e in failed_agents {
+            assert_eq!(w.pause_of(e), WANDER_BACKOFF_TICKS - 1);
         }
     }
 

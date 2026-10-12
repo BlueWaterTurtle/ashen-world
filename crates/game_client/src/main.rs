@@ -136,8 +136,7 @@ impl App {
             let view_proj = self.camera.view_proj();
             self.agent_instances.clear();
             for e in self.world.entities() {
-                let p = self.world.position(e);
-                let position = WorldPos::new(p.x, height_at(seed, p.x, p.z), p.z);
+                let position = self.world.position(e);
                 if agent_in_frustum(position, view_proj) {
                     let c = if self.world.selected_character() == Some(e) {
                         [0.2, 0.95, 0.35, 1.0]
