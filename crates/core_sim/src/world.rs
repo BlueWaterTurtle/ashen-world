@@ -4,7 +4,7 @@ use crate::behavior::Behavior;
 use crate::chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
 use crate::path::{find_path, Cell};
 use crate::rng::Rng;
-use crate::terrain::{height_at, is_walkable};
+use crate::terrain::{height_at, WalkabilityCache};
 
 /// Fixed simulation rate.
 pub const TICKS_PER_SECOND: u32 = 30;
@@ -64,6 +64,7 @@ pub struct World {
     pub behaviors: Vec<Behavior>,
     pub max_path_requests_per_tick: usize,
     rng: Rng,
+    walkability_cache: WalkabilityCache,
     /// Round-robin cursor so every idle agent eventually gets a path request.
     wander_cursor: usize,
 }
@@ -109,6 +110,7 @@ impl World {
             behaviors,
             max_path_requests_per_tick: config.max_path_requests_per_tick,
             rng,
+            walkability_cache: WalkabilityCache::default(),
             wander_cursor: 0,
         }
     }
@@ -182,7 +184,8 @@ impl World {
         let start = (p.x.floor() as i32, p.z.floor() as i32);
         let goal = (goal.x.floor() as i32, goal.z.floor() as i32);
         let seed = self.seed;
-        match find_path(start, goal, PATH_BUDGET, |c| is_walkable(seed, c)) {
+        let cache = &mut self.walkability_cache;
+        match find_path(start, goal, PATH_BUDGET, |c| cache.is_walkable(seed, c)) {
             Some(path) => {
                 if let Ok(mut c) = self.ecs.get::<&mut Path>(id) {
                     c.0 = Some(path.into_iter().skip(1).collect());
@@ -278,6 +281,7 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terrain::is_walkable;
 
     fn cfg(seed: u64) -> WorldConfig {
         WorldConfig {

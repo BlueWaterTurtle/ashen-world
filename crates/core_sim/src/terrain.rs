@@ -1,5 +1,7 @@
 use crate::chunk::{ChunkCoord, CHUNK_SIZE};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+
+const WALKABILITY_CACHE_CHUNKS: usize = 64;
 
 /// Height samples per chunk edge (one sample per meter-cell).
 pub const CELLS: usize = CHUNK_SIZE as usize;
@@ -51,6 +53,62 @@ pub fn is_walkable(seed: u64, cell: (i32, i32)) -> bool {
     [(1, 0), (-1, 0), (0, 1), (0, -1)]
         .iter()
         .all(|&(dx, dz)| (h((cell.0 + dx, cell.1 + dz)) - here).abs() <= MAX_STEP_HEIGHT)
+}
+
+/// Bounded cache of walkability for cells visited by pathfinding.
+#[derive(Debug, Default)]
+pub(crate) struct WalkabilityCache {
+    chunks: HashMap<ChunkCoord, Vec<bool>>,
+    insertion_order: VecDeque<ChunkCoord>,
+}
+
+impl WalkabilityCache {
+    pub(crate) fn is_walkable(&mut self, seed: u64, cell: (i32, i32)) -> bool {
+        let size = CHUNK_SIZE as i32;
+        let coord = ChunkCoord::new(cell.0.div_euclid(size), cell.1.div_euclid(size));
+        if !self.chunks.contains_key(&coord) {
+            self.cache_chunk(seed, coord);
+        }
+        let x = cell.0.rem_euclid(size) as usize;
+        let z = cell.1.rem_euclid(size) as usize;
+        self.chunks[&coord][z * size as usize + x]
+    }
+
+    fn cache_chunk(&mut self, seed: u64, coord: ChunkCoord) {
+        let size = CHUNK_SIZE as usize;
+        let samples = size + 2;
+        let (origin_x, origin_z) = coord.origin();
+        let mut heights = vec![0.0; samples * samples];
+        for z in 0..samples {
+            for x in 0..samples {
+                heights[z * samples + x] =
+                    height_at(seed, origin_x + x as f32 - 0.5, origin_z + z as f32 - 0.5);
+            }
+        }
+
+        let mut walkable = vec![false; size * size];
+        for z in 0..size {
+            for x in 0..size {
+                let center = heights[(z + 1) * samples + x + 1];
+                walkable[z * size + x] = [
+                    heights[(z + 1) * samples + x + 2],
+                    heights[(z + 1) * samples + x],
+                    heights[(z + 2) * samples + x + 1],
+                    heights[z * samples + x + 1],
+                ]
+                .iter()
+                .all(|h| (*h - center).abs() <= MAX_STEP_HEIGHT);
+            }
+        }
+
+        if self.chunks.len() == WALKABILITY_CACHE_CHUNKS {
+            if let Some(oldest) = self.insertion_order.pop_front() {
+                self.chunks.remove(&oldest);
+            }
+        }
+        self.chunks.insert(coord, walkable);
+        self.insertion_order.push_back(coord);
+    }
 }
 
 /// Heightmap for one chunk.
@@ -142,6 +200,21 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(cells.iter().any(|&w| w));
+    }
+
+    #[test]
+    fn cached_walkability_matches_direct_queries_across_chunk_boundaries() {
+        let mut cache = WalkabilityCache::default();
+        for z in -66..=66 {
+            for x in -66..=66 {
+                assert_eq!(
+                    cache.is_walkable(29, (x, z)),
+                    is_walkable(29, (x, z)),
+                    "cell ({x}, {z})"
+                );
+            }
+        }
+        assert!(cache.chunks.len() <= WALKABILITY_CACHE_CHUNKS);
     }
 
     #[test]
