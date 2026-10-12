@@ -133,16 +133,77 @@ impl Inventory {
 }
 
 /// Deterministic simulation tiers for persistent NPCs.
+///
+/// Distinguishes full per-tick simulation from cheaper throttled simulation and
+/// coarse background persistence, while keeping rendering decisions independent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum SimTier {
+pub enum SimulationTier {
     /// Full movement, pathfinding, and behavior updates every simulation tick.
+    /// Rendered when visible. Used for player characters, squad members, and nearby NPCs.
     #[default]
     Active,
     /// Throttled updates (e.g. every N ticks) with reduced movement/scheduling overhead.
+    /// Rendered when visible. Used for broader-area NPCs relevant to the current region.
     Reduced,
-    /// State survives persistently, but full A* pathfinding is omitted.
+    /// State survives persistently, but full A* pathfinding and per-tick physics are skipped.
     /// Advances toward destinations with cheap direct movement and resumes cleanly when in focus.
+    /// Generally not rendered until promoted back to a higher tier.
     Dormant,
+}
+
+/// Backwards-compatible alias for [`SimulationTier`].
+pub type SimTier = SimulationTier;
+
+impl SimulationTier {
+    /// Whether this NPC is in the [`SimulationTier::Active`] tier.
+    #[inline]
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    /// Whether this NPC is in the [`SimulationTier::Reduced`] tier.
+    #[inline]
+    pub const fn is_reduced(self) -> bool {
+        matches!(self, Self::Reduced)
+    }
+
+    /// Whether this NPC is in the [`SimulationTier::Dormant`] tier.
+    #[inline]
+    pub const fn is_dormant(self) -> bool {
+        matches!(self, Self::Dormant)
+    }
+
+    /// Whether this tier allows the NPC to be rendered when visible in the camera frustum.
+    ///
+    /// Rendering depends on visibility and renderability rather than full simulation:
+    /// both `Active` and `Reduced` NPCs are rendered when in view, while `Dormant` NPCs
+    /// are not rendered until promoted.
+    #[inline]
+    pub const fn is_renderable(self) -> bool {
+        !self.is_dormant()
+    }
+
+    /// Effective update interval (in simulation ticks) for this tier.
+    #[inline]
+    pub const fn update_interval(self, reduced_interval: u32, dormant_interval: u32) -> u32 {
+        match self {
+            Self::Active => 1,
+            Self::Reduced => {
+                if reduced_interval > 0 {
+                    reduced_interval
+                } else {
+                    1
+                }
+            }
+            Self::Dormant => {
+                if dormant_interval > 0 {
+                    dormant_interval
+                } else {
+                    1
+                }
+            }
+        }
+    }
 }
 
 /// Configuration for simulation LOD tiering.
@@ -157,6 +218,8 @@ pub struct LodConfig {
     pub reduced_radius: f32,
     /// Ticks between updates for Reduced-tier entities.
     pub reduced_tick_interval: u32,
+    /// Ticks between updates for Dormant-tier entities.
+    pub dormant_tick_interval: u32,
     /// Whether player-controlled characters automatically act as focus points.
     pub track_player_focus: bool,
 }
@@ -168,6 +231,7 @@ impl Default for LodConfig {
             active_radius: 64.0,
             reduced_radius: 160.0,
             reduced_tick_interval: 4,
+            dormant_tick_interval: 10,
             track_player_focus: true,
         }
     }
@@ -209,7 +273,7 @@ pub struct PersistentNpcRecord {
     pub pause_ticks: u32,
     pub player_controlled: bool,
     pub recruitable: bool,
-    pub tier: SimTier,
+    pub tier: SimulationTier,
     pub skills: Skills,
     pub inventory: Inventory,
 }
@@ -269,5 +333,32 @@ mod tests {
         assert!(inv.remove("iron_ore", 9));
         assert_eq!(inv.count_of("iron_ore"), 0);
         assert_eq!(inv.items().len(), 1); // only bread remains
+    }
+
+    #[test]
+    fn simulation_tier_properties_and_rendering_separation() {
+        let active = SimulationTier::Active;
+        let reduced = SimulationTier::Reduced;
+        let dormant = SimulationTier::Dormant;
+
+        assert!(active.is_active());
+        assert!(!active.is_reduced());
+        assert!(!active.is_dormant());
+        assert!(active.is_renderable());
+        assert_eq!(active.update_interval(4, 10), 1);
+
+        assert!(!reduced.is_active());
+        assert!(reduced.is_reduced());
+        assert!(!reduced.is_dormant());
+        // Reduced NPCs are renderable when visible, even though update is throttled
+        assert!(reduced.is_renderable());
+        assert_eq!(reduced.update_interval(4, 10), 4);
+
+        assert!(!dormant.is_active());
+        assert!(!dormant.is_reduced());
+        assert!(dormant.is_dormant());
+        // Dormant NPCs are not renderable until promoted
+        assert!(!dormant.is_renderable());
+        assert_eq!(dormant.update_interval(4, 10), 10);
     }
 }

@@ -18,7 +18,7 @@ pub use chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
 pub use clock::GameClock;
 pub use npc::{
     DespawnError, EntityKind, Inventory, ItemStack, LodConfig, NavGoal, NpcId, PersistentNpcRecord,
-    SimTier, Skills,
+    SimTier, SimulationTier, Skills,
 };
 pub use path::{find_path, Cell, Pathfinder};
 pub use rng::Rng;

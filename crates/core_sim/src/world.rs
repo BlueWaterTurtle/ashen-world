@@ -4,7 +4,7 @@ use crate::behavior::Behavior;
 use crate::chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
 use crate::npc::{
     DespawnError, EntityKind, Inventory, LodConfig, NavGoal, NpcId, PersistentNpcRecord, SimTier,
-    Skills,
+    SimulationTier, Skills,
 };
 use crate::path::{Cell, Pathfinder};
 use crate::rng::Rng;
@@ -337,18 +337,31 @@ impl World {
             .and_then(|&id| self.ecs.get::<&EntityKind>(id).ok().map(|k| *k))
     }
 
-    pub fn tier(&self, e: Entity) -> SimTier {
+    pub fn tier(&self, e: Entity) -> SimulationTier {
         self.ids
             .get(e.0 as usize)
-            .and_then(|&id| self.ecs.get::<&SimTier>(id).ok().map(|t| *t))
-            .unwrap_or(SimTier::Active)
+            .and_then(|&id| self.ecs.get::<&SimulationTier>(id).ok().map(|t| *t))
+            .unwrap_or(SimulationTier::Active)
     }
 
-    pub fn set_tier(&mut self, e: Entity, new_tier: SimTier) {
+    pub fn set_tier(&mut self, e: Entity, new_tier: SimulationTier) {
         let current = self.tier(e);
         if current != new_tier {
             self.transition_tier(e, current, new_tier);
         }
+    }
+
+    /// Whether an entity's simulation tier permits rendering when within camera frustum.
+    ///
+    /// Active and Reduced tiers are renderable when visible.
+    /// Dormant entities are not rendered until promoted to a higher simulation tier.
+    pub fn is_renderable(&self, e: Entity) -> bool {
+        self.tier(e).is_renderable()
+    }
+
+    /// Whether an entity is marked as a persistent NPC whose state is preserved.
+    pub fn is_persistent(&self, e: Entity) -> bool {
+        self.entity_kind(e) == Some(EntityKind::PersistentNpc)
     }
 
     pub fn skills(&self, e: Entity) -> Option<hecs::Ref<'_, Skills>> {
@@ -557,7 +570,7 @@ impl World {
         None
     }
 
-    fn transition_tier(&mut self, e: Entity, old: SimTier, new: SimTier) {
+    fn transition_tier(&mut self, e: Entity, old: SimulationTier, new: SimulationTier) {
         let Some(&id) = self.ids.get(e.0 as usize) else {
             return;
         };
@@ -565,24 +578,26 @@ impl World {
             return;
         }
 
-        if let Ok(mut t) = self.ecs.get::<&mut SimTier>(id) {
+        if let Ok(mut t) = self.ecs.get::<&mut SimulationTier>(id) {
             *t = new;
         }
 
         match (old, new) {
-            (SimTier::Dormant, SimTier::Active) | (SimTier::Dormant, SimTier::Reduced) => {
+            (SimulationTier::Dormant, SimulationTier::Active)
+            | (SimulationTier::Dormant, SimulationTier::Reduced) => {
                 let p = self.position(e);
                 let cell = (p.x.floor() as i32, p.z.floor() as i32);
-                if let Some(walkable) = self.find_nearest_walkable_cell(cell, 3) {
-                    if walkable != cell {
-                        let snapped = WorldPos::new(
-                            walkable.0 as f32 + 0.5,
-                            height_at(self.seed, walkable.0 as f32 + 0.5, walkable.1 as f32 + 0.5),
-                            walkable.1 as f32 + 0.5,
-                        );
-                        self.set_position(e, snapped);
-                    }
-                }
+                let (cx, cz) = if let Some(walkable) = self.find_nearest_walkable_cell(cell, 3) {
+                    walkable
+                } else {
+                    cell
+                };
+                let snapped = WorldPos::new(
+                    cx as f32 + 0.5,
+                    height_at(self.seed, cx as f32 + 0.5, cz as f32 + 0.5),
+                    cz as f32 + 0.5,
+                );
+                self.set_position(e, snapped);
 
                 let goal = self.nav_goal(e);
                 if let Some(goal) = goal {
@@ -594,7 +609,8 @@ impl World {
                     self.enqueue_wander(e.0);
                 }
             }
-            (SimTier::Active, SimTier::Dormant) | (SimTier::Reduced, SimTier::Dormant) => {
+            (SimulationTier::Active, SimulationTier::Dormant)
+            | (SimulationTier::Reduced, SimulationTier::Dormant) => {
                 if let Ok(mut path) = self.ecs.get::<&mut Path>(id) {
                     if let Some(wp) = path.0.take() {
                         if let Some(&(cx, cz)) = wp.back() {
@@ -608,6 +624,9 @@ impl World {
                             }
                         }
                     }
+                }
+                if let Ok(mut vel) = self.ecs.get::<&mut Velocity>(id) {
+                    vel.0 = WorldPos::default();
                 }
             }
             _ => {}
@@ -792,6 +811,7 @@ impl World {
         let queue = &mut self.wander_queue;
         let queued = &mut self.wander_queued;
         let reduced_interval = self.lod.reduced_tick_interval.max(1);
+        let dormant_interval = self.lod.dormant_tick_interval.max(1);
 
         for (_, (entity, pos, vel, path, bid, pause, tier, nav_goal)) in self
             .ecs
@@ -908,19 +928,20 @@ impl World {
                     }
                 }
                 SimTier::Dormant => {
-                    pause.0 = pause.0.saturating_sub(1);
-                    let step_len = b.speed * TICK_DT;
+                    let on_tick = (self.tick + entity.0 as u64) % (dormant_interval as u64) == 0;
+                    if !on_tick {
+                        continue;
+                    }
+                    pause.0 = pause.0.saturating_sub(dormant_interval);
+                    let step_len = b.speed * TICK_DT * (dormant_interval as f32);
 
                     if let Some(target) = nav_goal.0 {
                         let dx = target.x - pos.0.x;
                         let dz = target.z - pos.0.z;
                         let dist = (dx * dx + dz * dz).sqrt();
                         if dist <= step_len {
-                            pos.0 = WorldPos::new(
-                                target.x,
-                                height_at(seed, target.x, target.z),
-                                target.z,
-                            );
+                            pos.0.x = target.x;
+                            pos.0.z = target.z;
                             vel.0 = WorldPos::default();
                             nav_goal.0 = None;
                             let (min, max) = (b.pause_ticks_min, b.pause_ticks_max);
@@ -932,9 +953,8 @@ impl World {
                             pause.0 = min + extra;
                         } else {
                             vel.0 = WorldPos::new(dx / dist * b.speed, 0.0, dz / dist * b.speed);
-                            pos.0.x += vel.0.x * TICK_DT;
-                            pos.0.z += vel.0.z * TICK_DT;
-                            pos.0.y = height_at(seed, pos.0.x, pos.0.z);
+                            pos.0.x += vel.0.x * TICK_DT * (dormant_interval as f32);
+                            pos.0.z += vel.0.z * TICK_DT * (dormant_interval as f32);
                         }
                     } else if pause.0 == 0 && b.wander_range > 0 {
                         let span = 2 * b.wander_range as u64 + 1;
@@ -1737,5 +1757,220 @@ mod tests {
 
         // Step simulation to ensure resumed entity simulates normally
         w.step();
+    }
+
+    #[test]
+    fn deterministic_tier_transitions_and_focus_tracking() {
+        let mut cfg = WorldConfig {
+            seed: 1234,
+            agent_count: 5,
+            ..Default::default()
+        };
+        cfg.lod = LodConfig {
+            enabled: true,
+            active_radius: 40.0,
+            reduced_radius: 100.0,
+            reduced_tick_interval: 4,
+            dormant_tick_interval: 8,
+            track_player_focus: true,
+        };
+        let mut w = World::generate(&cfg);
+
+        // Player is entity 0; set at (0, 0, 0)
+        let player = Entity(0);
+        assert!(w.is_player_controlled(player));
+        w.set_position(player, WorldPos::new(0.0, 0.0, 0.0));
+
+        let npc_near = Entity(1);
+        let npc_mid = Entity(2);
+        let npc_far = Entity(3);
+
+        w.set_player_controlled(npc_near, false);
+        w.set_player_controlled(npc_mid, false);
+        w.set_player_controlled(npc_far, false);
+
+        // Within active radius (d = 30 < 40)
+        w.set_position(npc_near, WorldPos::new(30.0, 0.0, 0.0));
+        // Within reduced radius (40 < d = 70 < 100)
+        w.set_position(npc_mid, WorldPos::new(70.0, 0.0, 0.0));
+        // Beyond reduced radius (d = 150 > 100)
+        w.set_position(npc_far, WorldPos::new(150.0, 0.0, 0.0));
+
+        w.step();
+
+        assert_eq!(w.tier(player), SimulationTier::Active);
+        assert_eq!(w.tier(npc_near), SimulationTier::Active);
+        assert_eq!(w.tier(npc_mid), SimulationTier::Reduced);
+        assert_eq!(w.tier(npc_far), SimulationTier::Dormant);
+
+        // Renderability check: Active and Reduced are renderable; Dormant is not
+        assert!(w.is_renderable(player));
+        assert!(w.is_renderable(npc_near));
+        assert!(w.is_renderable(npc_mid));
+        assert!(!w.is_renderable(npc_far));
+
+        // Now move player towards npc_far (to 140, 0, 0)
+        w.set_position(player, WorldPos::new(140.0, 0.0, 0.0));
+        w.step();
+
+        // Player focus shifted: npc_far is now close to player (d = 10 < 40), so promoted to Active!
+        // npc_near is now far (d = 110 > 100), demoted to Dormant!
+        // npc_mid is d = 70 (40 < d < 100), so Reduced!
+        assert_eq!(w.tier(player), SimulationTier::Active);
+        assert_eq!(w.tier(npc_far), SimulationTier::Active);
+        assert_eq!(w.tier(npc_near), SimulationTier::Dormant);
+        assert_eq!(w.tier(npc_mid), SimulationTier::Reduced);
+
+        assert!(w.is_renderable(npc_far));
+        assert!(!w.is_renderable(npc_near));
+    }
+
+    #[test]
+    fn state_persistence_across_full_tier_cycle() {
+        let mut cfg = WorldConfig {
+            seed: 8888,
+            agent_count: 2,
+            ..Default::default()
+        };
+        cfg.lod = LodConfig::with_radii(25.0, 60.0);
+        let mut w = World::generate(&cfg);
+
+        w.set_player_controlled(Entity(0), false);
+        w.set_focus_points(vec![WorldPos::new(0.0, 0.0, 0.0)]);
+
+        let npc = Entity(1);
+        let id = w.npc_id(npc).unwrap();
+
+        // Populate skills and inventory
+        if let Some(mut s) = w.skills_mut(npc) {
+            s.set("farming", 15);
+            s.set("crafting", 42);
+        }
+        if let Some(mut inv) = w.inventory_mut(npc) {
+            inv.add("wheat", 50);
+            inv.add("iron_ingot", 8);
+        }
+        let test_goal = WorldPos::new(120.0, 0.0, 120.0);
+        w.set_nav_goal(npc, Some(test_goal));
+
+        // Cycle through Active -> Reduced -> Dormant -> Reduced -> Active
+        let positions = [
+            (WorldPos::new(10.0, 0.0, 0.0), SimulationTier::Active),
+            (WorldPos::new(45.0, 0.0, 0.0), SimulationTier::Reduced),
+            (WorldPos::new(100.0, 0.0, 0.0), SimulationTier::Dormant),
+            (WorldPos::new(40.0, 0.0, 0.0), SimulationTier::Reduced),
+            (WorldPos::new(5.0, 0.0, 0.0), SimulationTier::Active),
+        ];
+
+        for (pos, expected_tier) in positions {
+            w.set_position(npc, pos);
+            w.step();
+            assert_eq!(w.tier(npc), expected_tier);
+            assert_eq!(w.npc_id(npc), Some(id));
+            assert_eq!(w.skills(npc).unwrap().get("farming"), 15);
+            assert_eq!(w.skills(npc).unwrap().get("crafting"), 42);
+            assert_eq!(w.inventory(npc).unwrap().count_of("wheat"), 50);
+            assert_eq!(w.inventory(npc).unwrap().count_of("iron_ingot"), 8);
+        }
+    }
+
+    #[test]
+    fn dormant_resume_into_active_simulation_with_terrain_alignment_and_path() {
+        let mut cfg = WorldConfig {
+            seed: 54321,
+            agent_count: 2,
+            ..Default::default()
+        };
+        cfg.lod = LodConfig::with_radii(30.0, 70.0);
+        let mut w = World::generate(&cfg);
+
+        w.set_player_controlled(Entity(0), false);
+        w.set_focus_points(vec![WorldPos::new(0.0, 0.0, 0.0)]);
+
+        let npc = Entity(1);
+        // Start far in Dormant zone
+        w.set_position(npc, WorldPos::new(200.0, 0.0, 200.0));
+        let goal = WorldPos::new(205.0, 0.0, 200.0);
+        w.set_nav_goal(npc, Some(goal));
+
+        w.step();
+        assert_eq!(w.tier(npc), SimulationTier::Dormant);
+        assert!(!w.has_path(npc));
+
+        // Promote to Active by moving focus point directly to the NPC
+        w.set_focus_points(vec![WorldPos::new(200.0, 0.0, 200.0)]);
+        w.step();
+
+        assert_eq!(w.tier(npc), SimulationTier::Active);
+        // Position must be aligned with height
+        let pos = w.position(npc);
+        let expected_y = height_at(w.seed, pos.x, pos.z);
+        assert_eq!(pos.y.to_bits(), expected_y.to_bits());
+
+        // Upon promotion with a goal, pathfinding should have been planned
+        assert!(w.has_path(npc));
+
+        // Step active simulation until it arrives or advances
+        for _ in 0..50 {
+            w.step();
+        }
+        let end_pos = w.position(npc);
+        assert!(end_pos.x > 200.0);
+    }
+
+    #[test]
+    fn deterministic_1000_agents_with_simulation_tiers() {
+        let mut cfg = WorldConfig {
+            seed: 9876,
+            agent_count: 1_000,
+            ..Default::default()
+        };
+        cfg.lod = LodConfig {
+            enabled: true,
+            active_radius: 50.0,
+            reduced_radius: 120.0,
+            reduced_tick_interval: 4,
+            dormant_tick_interval: 10,
+            track_player_focus: true,
+        };
+
+        let mut w1 = World::generate(&cfg);
+        let mut w2 = World::generate(&cfg);
+
+        w1.set_focus_points(vec![WorldPos::new(0.0, 0.0, 0.0)]);
+        w2.set_focus_points(vec![WorldPos::new(0.0, 0.0, 0.0)]);
+
+        // Run both worlds for 60 ticks
+        for _ in 0..60 {
+            w1.step();
+            w2.step();
+        }
+
+        let mut active_count = 0;
+        let mut reduced_count = 0;
+        let mut dormant_count = 0;
+
+        for e in w1.entities() {
+            let p1 = w1.position(e);
+            let p2 = w2.position(e);
+            assert_eq!(p1.x.to_bits(), p2.x.to_bits());
+            assert_eq!(p1.y.to_bits(), p2.y.to_bits());
+            assert_eq!(p1.z.to_bits(), p2.z.to_bits());
+
+            let t1 = w1.tier(e);
+            let t2 = w2.tier(e);
+            assert_eq!(t1, t2);
+            match t1 {
+                SimulationTier::Active => active_count += 1,
+                SimulationTier::Reduced => reduced_count += 1,
+                SimulationTier::Dormant => dormant_count += 1,
+            }
+        }
+
+        // Verify all 3 tiers are populated across the 1000 agents
+        assert!(active_count > 0, "should have active agents");
+        assert!(reduced_count > 0, "should have reduced agents");
+        assert!(dormant_count > 0, "should have dormant agents");
+        assert_eq!(active_count + reduced_count + dormant_count, 1000);
     }
 }
