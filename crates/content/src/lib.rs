@@ -1,6 +1,7 @@
 //! Serializable content definitions and JSON loading.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +20,61 @@ pub struct UnitArchetype {
     pub faction: String,
     pub max_health: f32,
     pub move_speed: f32,
+    /// Id of a [`Race`].
+    pub race: String,
+    /// Id of a [`Behavior`].
+    pub behavior: String,
+}
+
+/// A modification to a named stat: `(base + flat) * (1 + percent)`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatModifier {
+    pub stat: String,
+    #[serde(default)]
+    pub flat: f32,
+    #[serde(default)]
+    pub percent: f32,
+}
+
+/// Apply modifiers for `stat` to `base`. Flat bonuses sum first, then percentages sum.
+pub fn effective_stat(stat: &str, base: f32, modifiers: &[StatModifier]) -> f32 {
+    let (flat, pct) = modifiers
+        .iter()
+        .filter(|m| m.stat == stat)
+        .fold((0.0, 0.0), |(f, p), m| (f + m.flat, p + m.percent));
+    (base + flat) * (1.0 + pct)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Race {
+    pub id: String,
+    pub name: String,
+    /// Base stat values keyed by stat name (e.g. "strength").
+    pub base_stats: BTreeMap<String, f32>,
+    /// Racial buffs and debuffs.
+    #[serde(default)]
+    pub modifiers: Vec<StatModifier>,
+}
+
+impl Race {
+    /// Effective value of `stat` (base plus racial modifiers); 0 base if undefined.
+    pub fn stat(&self, stat: &str) -> f32 {
+        let base = self.base_stats.get(stat).copied().unwrap_or(0.0);
+        effective_stat(stat, base, &self.modifiers)
+    }
+}
+
+/// Data-driven movement behaviour. `wander_range == 0` means the unit stays put.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Behavior {
+    pub id: String,
+    pub name: String,
+    /// Wander destinations are within this many cells (per axis).
+    pub wander_range: i32,
+    pub pause_seconds_min: f32,
+    pub pause_seconds_max: f32,
+    /// Multiplier on the unit's move speed.
+    pub speed_multiplier: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -34,6 +90,8 @@ pub struct Content {
     pub factions: Vec<Faction>,
     pub units: Vec<UnitArchetype>,
     pub biomes: Vec<Biome>,
+    pub races: Vec<Race>,
+    pub behaviors: Vec<Behavior>,
 }
 
 #[derive(Debug)]
@@ -102,7 +160,7 @@ fn check_unique<'a>(
     Ok(())
 }
 
-/// Load `factions.json`, `units.json` and `biomes.json` from `dir` and validate them.
+/// Load `factions.json`, `units.json`, `biomes.json`, `races.json` and `behaviors.json` from `dir` and validate them.
 pub fn load_content(dir: impl AsRef<Path>) -> Result<Content, ContentError> {
     let dir = dir.as_ref();
     let fp = dir.join("factions.json");
@@ -111,6 +169,34 @@ pub fn load_content(dir: impl AsRef<Path>) -> Result<Content, ContentError> {
     let factions: Vec<Faction> = load_file(&fp)?;
     let units: Vec<UnitArchetype> = load_file(&up)?;
     let biomes: Vec<Biome> = load_file(&bp)?;
+    let rp = dir.join("races.json");
+    let hp = dir.join("behaviors.json");
+    let races: Vec<Race> = load_file(&rp)?;
+    let behaviors: Vec<Behavior> = load_file(&hp)?;
+    check_unique(&rp, races.iter().map(|r| &r.id))?;
+    check_unique(&hp, behaviors.iter().map(|b| &b.id))?;
+    for b in &behaviors {
+        if b.wander_range < 0
+            || b.pause_seconds_min < 0.0
+            || b.pause_seconds_max < b.pause_seconds_min
+            || b.speed_multiplier < 0.0
+        {
+            return Err(invalid(
+                &hp,
+                format!("behavior '{}' has invalid values", b.id),
+            ));
+        }
+    }
+    for r in &races {
+        for m in &r.modifiers {
+            if !r.base_stats.contains_key(&m.stat) {
+                return Err(invalid(
+                    &rp,
+                    format!("race '{}' modifies undefined stat '{}'", r.id, m.stat),
+                ));
+            }
+        }
+    }
 
     check_unique(&fp, factions.iter().map(|f| &f.id))?;
     check_unique(&up, units.iter().map(|u| &u.id))?;
@@ -120,6 +206,21 @@ pub fn load_content(dir: impl AsRef<Path>) -> Result<Content, ContentError> {
             return Err(invalid(
                 &up,
                 format!("unit '{}' references unknown faction '{}'", u.id, u.faction),
+            ));
+        }
+        if !races.iter().any(|r| r.id == u.race) {
+            return Err(invalid(
+                &up,
+                format!("unit '{}' references unknown race '{}'", u.id, u.race),
+            ));
+        }
+        if !behaviors.iter().any(|b| b.id == u.behavior) {
+            return Err(invalid(
+                &up,
+                format!(
+                    "unit '{}' references unknown behavior '{}'",
+                    u.id, u.behavior
+                ),
             ));
         }
         if u.max_health <= 0.0 || u.move_speed < 0.0 {
@@ -138,6 +239,8 @@ pub fn load_content(dir: impl AsRef<Path>) -> Result<Content, ContentError> {
         factions,
         units,
         biomes,
+        races,
+        behaviors,
     })
 }
 
@@ -155,6 +258,35 @@ mod tests {
         assert!(!c.factions.is_empty());
         assert!(!c.units.is_empty());
         assert!(!c.biomes.is_empty());
+    }
+
+    #[test]
+    fn race_modifiers_apply() {
+        let c = load_content(assets_dir()).unwrap();
+        let human = c.races.iter().find(|r| r.id == "human").unwrap();
+        let brute = c.races.iter().find(|r| r.id == "brute").unwrap();
+        assert_eq!(human.stat("strength"), 10.0);
+        // brute: base 10, +2 flat, +25% => 15; dexterity base 10, -20% => 8
+        assert!((brute.stat("strength") - 15.0).abs() < 1e-4);
+        assert!((brute.stat("dexterity") - 8.0).abs() < 1e-4);
+        assert_eq!(brute.stat("unknown"), 0.0);
+    }
+
+    #[test]
+    fn unit_references_resolve_and_bad_ones_fail() {
+        let src = assets_dir();
+        let dir = std::env::temp_dir().join("ashen_world_bad_ref");
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["factions", "biomes", "races", "behaviors"] {
+            std::fs::copy(src.join(format!("{f}.json")), dir.join(format!("{f}.json"))).unwrap();
+        }
+        std::fs::write(
+            dir.join("units.json"),
+            r#"[{"id":"x","name":"X","faction":"wanderers","max_health":1.0,"move_speed":1.0,"race":"human","behavior":"nope"}]"#,
+        )
+        .unwrap();
+        let err = load_content(&dir).unwrap_err();
+        assert!(err.to_string().contains("unknown behavior 'nope'"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 mod camera;
 
 use camera::Camera;
-use core_sim::{ChunkStreamer, World, WorldConfig, WorldPos, CHUNK_SIZE, TICK_DT};
+use core_sim::{Behavior, ChunkStreamer, World, WorldConfig, WorldPos, CHUNK_SIZE, TICK_DT};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -201,6 +201,29 @@ impl ApplicationHandler for App {
     }
 }
 
+/// One sim behaviour per unit archetype: the archetype's behaviour definition, with
+/// its speed scaled from the archetype's `move_speed`.
+fn behaviors_from_content(c: &content::Content) -> Vec<Behavior> {
+    let behaviors: Vec<Behavior> = c
+        .units
+        .iter()
+        .filter_map(|u| {
+            let b = c.behaviors.iter().find(|b| b.id == u.behavior)?;
+            Some(Behavior::from_seconds(
+                b.wander_range,
+                b.pause_seconds_min,
+                b.pause_seconds_max,
+                u.move_speed * b.speed_multiplier,
+            ))
+        })
+        .collect();
+    if behaviors.is_empty() {
+        vec![Behavior::default()]
+    } else {
+        behaviors
+    }
+}
+
 fn main() {
     let content_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/content");
     match content::load_content(&content_dir) {
@@ -212,7 +235,14 @@ fn main() {
         ),
         Err(e) => eprintln!("content load failed: {e}"),
     }
-    let world = World::generate(&WorldConfig::default());
+    let config = match content::load_content(&content_dir) {
+        Ok(c) => WorldConfig {
+            behaviors: behaviors_from_content(&c),
+            ..WorldConfig::default()
+        },
+        Err(_) => WorldConfig::default(),
+    };
+    let world = World::generate(&config);
     let event_loop = match EventLoop::new() {
         Ok(l) => l,
         Err(e) => {
