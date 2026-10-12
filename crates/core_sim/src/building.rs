@@ -1,6 +1,6 @@
 use crate::chunk::WorldPos;
 use crate::clock::GameClock;
-use crate::terrain::{height_at, MAX_STEP_HEIGHT};
+use crate::terrain::{fertility_at, height_at, resource_richness_at, MAX_STEP_HEIGHT};
 
 /// Axis-aligned footprint in world cells: `[x, x + width) x [z, z + depth)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,12 +46,18 @@ pub enum PlaceError {
     Overlaps,
     InProtectedZone,
     MissingResource(String),
+    InsufficientResourceRichness(String),
+    InsufficientFertility,
 }
 
 /// What a building needs to be placed; filled from content by the caller.
 #[derive(Debug, Clone, Default)]
 pub struct PlacementRules {
     pub requires_resource: Option<String>,
+    /// Minimum footprint-average richness for `requires_resource`, in `[0, 1]`.
+    pub minimum_resource_richness: Option<f32>,
+    /// Minimum footprint-average soil fertility, in `[0, 1]`.
+    pub minimum_fertility: Option<f32>,
     /// Extra empty cells required around other buildings.
     pub building_margin: i32,
 }
@@ -93,13 +99,23 @@ impl Buildings {
             return Err(PlaceError::Overlaps);
         }
         if let Some(kind) = &rules.requires_resource {
-            if !self
+            if let Some(minimum) = rules.minimum_resource_richness {
+                if average_resource_richness(seed, fp, kind) <= minimum {
+                    return Err(PlaceError::InsufficientResourceRichness(kind.clone()));
+                }
+            } else if !self
                 .resources
                 .iter()
                 .any(|r| &r.kind == kind && fp.contains(r.cell))
             {
                 return Err(PlaceError::MissingResource(kind.clone()));
             }
+        }
+        if rules
+            .minimum_fertility
+            .is_some_and(|minimum| average_fertility(seed, fp) <= minimum)
+        {
+            return Err(PlaceError::InsufficientFertility);
         }
         Ok(())
     }
@@ -133,6 +149,36 @@ impl Buildings {
             0.0,
             f.z as f32 + f.depth as f32 / 2.0,
         )
+    }
+}
+
+/// Average resource richness across all cells covered by a footprint.
+pub fn average_resource_richness(seed: u64, fp: Footprint, resource: &str) -> f32 {
+    footprint_average(fp, |x, z| {
+        resource_richness_at(seed, resource, x as f32 + 0.5, z as f32 + 0.5)
+    })
+}
+
+/// Average soil fertility across all cells covered by a footprint.
+pub fn average_fertility(seed: u64, fp: Footprint) -> f32 {
+    footprint_average(fp, |x, z| {
+        fertility_at(seed, x as f32 + 0.5, z as f32 + 0.5)
+    })
+}
+
+fn footprint_average(fp: Footprint, sample: impl Fn(i32, i32) -> f32) -> f32 {
+    let mut total = 0.0;
+    let mut count = 0;
+    for z in fp.z..fp.z + fp.depth {
+        for x in fp.x..fp.x + fp.width {
+            total += sample(x, z);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f32
     }
 }
 
@@ -179,6 +225,8 @@ mod tests {
         );
         let mine = PlacementRules {
             requires_resource: Some("iron_ore".into()),
+            minimum_resource_richness: None,
+            minimum_fertility: None,
             building_margin: 0,
         };
         assert_eq!(
@@ -190,6 +238,35 @@ mod tests {
             cell: (11, 11),
         });
         assert!(b.validate(1, fp(10, 10, 2, 2), &mine).is_ok());
+
+        let rich_site = PlacementRules {
+            requires_resource: Some("iron_ore".into()),
+            minimum_resource_richness: Some(0.0),
+            minimum_fertility: None,
+            building_margin: 0,
+        };
+        assert!(b.validate(1, fp(10, 10, 1, 1), &rich_site).is_ok());
+        let impossible_richness = PlacementRules {
+            minimum_resource_richness: Some(1.0),
+            ..rich_site.clone()
+        };
+        assert_eq!(
+            b.validate(1, fp(10, 10, 1, 1), &impossible_richness),
+            Err(PlaceError::InsufficientResourceRichness("iron_ore".into()))
+        );
+        let fertile_site = PlacementRules {
+            minimum_fertility: Some(0.0),
+            ..PlacementRules::default()
+        };
+        assert!(b.validate(1, fp(10, 10, 1, 1), &fertile_site).is_ok());
+        let impossible_fertility = PlacementRules {
+            minimum_fertility: Some(1.0),
+            ..PlacementRules::default()
+        };
+        assert_eq!(
+            b.validate(1, fp(10, 10, 1, 1), &impossible_fertility),
+            Err(PlaceError::InsufficientFertility)
+        );
         assert!(b.blocks((1, 1)) && !b.blocks((5, 5)));
     }
 

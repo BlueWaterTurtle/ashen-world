@@ -12,7 +12,8 @@ pub mod world;
 
 pub use behavior::Behavior;
 pub use building::{
-    crop_progress, Building, Buildings, Footprint, PlaceError, PlacementRules, ResourceNode,
+    average_fertility, average_resource_richness, crop_progress, Building, Buildings, Footprint,
+    PlaceError, PlacementRules, ResourceNode,
 };
 pub use chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
 pub use clock::GameClock;
@@ -22,7 +23,9 @@ pub use npc::{
 };
 pub use path::{find_path, Cell, Pathfinder};
 pub use rng::Rng;
-pub use terrain::{height_at, is_walkable, ChunkStreamer, ChunkTerrain};
+pub use terrain::{
+    fertility_at, height_at, is_walkable, resource_richness_at, ChunkStreamer, ChunkTerrain,
+};
 pub use world::{
     ControlError, Entity, PlayerControlled, RecruitError, Recruitable, World, WorldConfig,
     RECRUIT_MAX_DISTANCE, TICKS_PER_SECOND, TICK_DT,

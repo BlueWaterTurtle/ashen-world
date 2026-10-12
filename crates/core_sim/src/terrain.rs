@@ -43,6 +43,25 @@ pub fn height_at(seed: u64, x: f32, z: f32) -> f32 {
     (broad * 0.72 + mid * 0.22 + fine * 0.06) * 40.0
 }
 
+/// Deterministic mineral richness for a resource kind at a world position, in `[0, 1)`.
+pub fn resource_richness_at(seed: u64, resource: &str, x: f32, z: f32) -> f32 {
+    let resource_seed = resource
+        .bytes()
+        .fold(seed ^ 0xA076_1D64_78BD_642F, |hash, byte| {
+            hash.wrapping_mul(0xE703_7ED1_A0B4_28DB) ^ u64::from(byte)
+        });
+    let broad = value_noise(resource_seed, x, z, 150.0);
+    let local = value_noise(resource_seed.wrapping_add(1), x, z, 42.0);
+    broad * 0.65 + local * 0.35
+}
+
+/// Deterministic soil fertility at a world position, in `[0, 1)`.
+pub fn fertility_at(seed: u64, x: f32, z: f32) -> f32 {
+    let broad = value_noise(seed ^ 0xE703_7ED1_A0B4_28DB, x, z, 180.0);
+    let local = value_noise(seed ^ 0x8EBC_6AF0_9C88_C6E3, x, z, 54.0);
+    broad * 0.6 + local * 0.4
+}
+
 /// Maximum height difference (meters) between adjacent cells that can still be walked.
 pub const MAX_STEP_HEIGHT: f32 = 0.2;
 
@@ -253,6 +272,19 @@ mod tests {
         assert_eq!(a, ChunkTerrain::generate(5, c));
         assert_ne!(a, ChunkTerrain::generate(6, c));
         assert!(a.heights.iter().all(|h| (0.0..40.0).contains(h)));
+    }
+
+    #[test]
+    fn richness_and_fertility_are_seeded_continuous_fields() {
+        let richness = resource_richness_at(41, "iron_ore", 18.0, 27.0);
+        let fertility = fertility_at(41, 18.0, 27.0);
+        assert_eq!(richness, resource_richness_at(41, "iron_ore", 18.0, 27.0));
+        assert_eq!(fertility, fertility_at(41, 18.0, 27.0));
+        assert!((0.0..1.0).contains(&richness));
+        assert!((0.0..1.0).contains(&fertility));
+        assert_ne!(richness, resource_richness_at(41, "iron_ore", 180.0, -90.0));
+        assert_ne!(fertility, fertility_at(41, 180.0, -90.0));
+        assert_ne!(richness, resource_richness_at(42, "iron_ore", 18.0, 27.0));
     }
 
     #[test]

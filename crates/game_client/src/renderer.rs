@@ -8,6 +8,7 @@ use winit::window::Window;
 
 use crate::camera::Camera;
 use crate::mesh::{capsule_mesh, terrain_chunk_mesh, Vertex};
+use crate::ui::GameUi;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Linear-space haze colour; also used as the clear colour so distant terrain fades into it.
@@ -330,6 +331,10 @@ impl Renderer {
         self.config.width as f32 / self.config.height as f32
     }
 
+    pub fn create_ui(&self, window: &Arc<Window>) -> GameUi {
+        GameUi::new(window, &self.device, self.config.format)
+    }
+
     pub fn loaded_chunks(&self) -> usize {
         self.chunks.len()
     }
@@ -358,6 +363,8 @@ impl Renderer {
         &mut self,
         camera: &Camera,
         agents: &[AgentInstance],
+        ui: &mut GameUi,
+        pixels_per_point: f32,
     ) -> Result<(), wgpu::SurfaceError> {
         if agents.len() > self.instance_capacity {
             self.instance_capacity = agents.len().next_power_of_two();
@@ -432,7 +439,19 @@ impl Renderer {
                 pass.draw_indexed(0..self.agent_mesh.index_count, 0, 0..self.instance_count);
             }
         }
-        self.queue.submit(Some(encoder.finish()));
+        let ui_commands = ui.paint(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &frame_view,
+            [self.config.width, self.config.height],
+            pixels_per_point,
+        );
+        self.queue.submit(
+            ui_commands
+                .into_iter()
+                .chain(std::iter::once(encoder.finish())),
+        );
         frame.present();
         Ok(())
     }

@@ -78,6 +78,12 @@ pub struct BuildingDef {
     /// Resource node type this must be placed on (e.g. "iron_ore"); `None` = anywhere.
     #[serde(default)]
     pub requires_resource: Option<String>,
+    /// Minimum footprint-average richness for the required resource, in `[0, 1]`.
+    #[serde(default)]
+    pub min_resource_richness: Option<f32>,
+    /// Minimum footprint-average soil fertility, in `[0, 1]`.
+    #[serde(default)]
+    pub min_fertility: Option<f32>,
     /// Whether residents can live here.
     #[serde(default)]
     pub dwelling: bool,
@@ -226,6 +232,16 @@ pub fn load_content(dir: impl AsRef<Path>) -> Result<Content, ContentError> {
             return Err(invalid(
                 &bdp,
                 format!("building '{}' needs a footprint >= 1x1", b.id),
+            ));
+        }
+        if b.min_resource_richness
+            .into_iter()
+            .chain(b.min_fertility)
+            .any(|value| !(0.0..=1.0).contains(&value))
+        {
+            return Err(invalid(
+                &bdp,
+                format!("building '{}' has a site threshold outside [0, 1]", b.id),
             ));
         }
         if let Some(c) = &b.crop {
