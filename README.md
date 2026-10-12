@@ -28,4 +28,4 @@ cargo test --workspace
 ```
 
 ## Roadmap (Milestone 2)
-Milestone 2 (in progress): seeded terrain heightmaps, chunk streaming around the camera (tinted in the placeholder renderer) and a grid A* pathfinding baseline are in `core_sim`. Next: agents following paths, terrain-aware navigation, real GPU rendering (wgpu).
+Milestone 2 (done): seeded terrain heightmaps, chunk streaming and grid A* in `core_sim`. Milestone 3 (headless part done): wandering agents with budgeted path requests. Next: real GPU rendering (wgpu) with terrain meshes, needs/inventory, content-driven archetypes.

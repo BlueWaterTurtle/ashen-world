@@ -21,6 +21,12 @@ pub struct WorldConfig {
     /// Agents spawn in chunks within this radius (in chunks) of the origin.
     pub chunk_radius: i32,
     pub max_speed: f32,
+    /// If true, idle agents pick nearby random destinations and path to them.
+    pub wander: bool,
+    /// Wander destinations are within this many cells (per axis) of the agent.
+    pub wander_range: i32,
+    /// Maximum number of path requests served per tick (bounds A* cost).
+    pub max_path_requests_per_tick: usize,
 }
 
 impl Default for WorldConfig {
@@ -30,6 +36,9 @@ impl Default for WorldConfig {
             agent_count: 1000,
             chunk_radius: 2,
             max_speed: 3.0,
+            wander: true,
+            wander_range: 40,
+            max_path_requests_per_tick: 8,
         }
     }
 }
@@ -45,6 +54,12 @@ pub struct World {
     pub paths: Vec<Option<VecDeque<Cell>>>,
     /// Walking speed (m/s) used when following a path.
     pub walk_speed: f32,
+    pub wander: bool,
+    pub wander_range: i32,
+    pub max_path_requests_per_tick: usize,
+    rng: Rng,
+    /// Round-robin cursor so every idle agent eventually gets a path request.
+    wander_cursor: usize,
 }
 
 /// Maximum A* node expansions per path request.
@@ -67,11 +82,16 @@ impl World {
                 rng.range_f32(0.0, CHUNK_SIZE),
             );
             positions.push(WorldPos::from_chunk_local(ChunkCoord::new(cx, cz), local));
-            velocities.push(WorldPos::new(
+            let (vx, vz) = (
                 rng.range_f32(-config.max_speed, config.max_speed),
-                0.0,
                 rng.range_f32(-config.max_speed, config.max_speed),
-            ));
+            );
+            // Wandering agents start idle; velocity is driven by path following.
+            velocities.push(if config.wander {
+                WorldPos::default()
+            } else {
+                WorldPos::new(vx, 0.0, vz)
+            });
         }
         let positions_len = positions.len();
         Self {
@@ -81,6 +101,11 @@ impl World {
             positions,
             velocities,
             walk_speed: config.max_speed,
+            wander: config.wander,
+            wander_range: config.wander_range.max(1),
+            max_path_requests_per_tick: config.max_path_requests_per_tick,
+            rng,
+            wander_cursor: 0,
         }
     }
 
@@ -115,6 +140,9 @@ impl World {
 
     /// Advance the simulation by exactly one fixed tick.
     pub fn step(&mut self) {
+        if self.wander {
+            self.assign_wander_goals();
+        }
         self.follow_paths();
         for (p, v) in self.positions.iter_mut().zip(&self.velocities) {
             p.x += v.x * TICK_DT;
@@ -122,6 +150,31 @@ impl World {
             p.z += v.z * TICK_DT;
         }
         self.tick += 1;
+    }
+
+    /// Serve a bounded number of path requests for idle agents, round-robin.
+    fn assign_wander_goals(&mut self) {
+        let n = self.paths.len();
+        let mut requests = 0;
+        for _ in 0..n {
+            if requests >= self.max_path_requests_per_tick {
+                break;
+            }
+            let i = self.wander_cursor;
+            self.wander_cursor = (self.wander_cursor + 1) % n;
+            if self.paths[i].is_some() {
+                continue;
+            }
+            requests += 1;
+            let r = self.wander_range;
+            let dx = (self.rng.next_u64() % (2 * r as u64 + 1)) as i32 - r;
+            let dz = (self.rng.next_u64() % (2 * r as u64 + 1)) as i32 - r;
+            let p = self.positions[i];
+            self.navigate_to(
+                Entity(i as u32),
+                WorldPos::new(p.x + dx as f32, 0.0, p.z + dz as f32),
+            );
+        }
     }
 
     fn follow_paths(&mut self) {
@@ -198,6 +251,11 @@ mod tests {
             velocities: vec![WorldPos::new(3.0, 0.0, -6.0)],
             paths: vec![None],
             walk_speed: 3.0,
+            wander: false,
+            wander_range: 10,
+            max_path_requests_per_tick: 0,
+            rng: Rng::new(0),
+            wander_cursor: 0,
         };
         w.run_ticks(TICKS_PER_SECOND as u64);
         assert_eq!(w.tick, TICKS_PER_SECOND as u64);
@@ -211,6 +269,7 @@ mod tests {
         let mut w = World::generate(&WorldConfig {
             seed: 11,
             agent_count: 1,
+            wander: false,
             ..Default::default()
         });
         let seed = w.seed;
@@ -239,6 +298,7 @@ mod tests {
         let mut w = World::generate(&WorldConfig {
             seed: 11,
             agent_count: 1,
+            wander: false,
             ..Default::default()
         });
         let seed = w.seed;
@@ -251,5 +311,33 @@ mod tests {
             assert!(!w.navigate_to(Entity(0), WorldPos::new(c.0 as f32, 0.0, c.1 as f32)));
             assert_eq!(w.paths[0], before);
         }
+    }
+
+    #[test]
+    fn wandering_is_deterministic_and_moves_agents() {
+        let c = WorldConfig {
+            seed: 5,
+            agent_count: 50,
+            ..Default::default()
+        };
+        let (mut a, mut b) = (World::generate(&c), World::generate(&c));
+        let start = a.positions.clone();
+        a.run_ticks(300);
+        b.run_ticks(300);
+        assert_eq!(a, b);
+        assert_ne!(a.positions, start);
+    }
+
+    #[test]
+    fn path_requests_are_budgeted() {
+        let c = WorldConfig {
+            seed: 5,
+            agent_count: 100,
+            max_path_requests_per_tick: 3,
+            ..Default::default()
+        };
+        let mut w = World::generate(&c);
+        w.step();
+        assert!(w.paths.iter().filter(|p| p.is_some()).count() <= 3);
     }
 }

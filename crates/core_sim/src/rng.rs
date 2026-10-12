@@ -1,5 +1,5 @@
 /// Small deterministic PRNG (SplitMix64). Same seed always yields the same sequence.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Rng {
     state: u64,
 }
