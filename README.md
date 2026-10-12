@@ -34,7 +34,7 @@ Milestone 2 (done): seeded terrain heightmaps, chunk streaming and grid A* in `c
 ## Data-driven content
 Gameplay values live in `assets/content/*.json`, not the engine: `factions`, `units`, `biomes`, `races` (base stats plus buff/debuff modifiers) and `behaviors` (wander range, pause time, speed multiplier). Units reference a race and behavior by id; references are validated on load. `core_sim::GameClock` derives day/time-of-day from the tick counter (no per-tick cost) for future crop growth.
 
-`buildings.json` and `crops.json` define placeable buildings (footprint, required resource, dwelling, cost, crop) and crops (growth days, yield); `core_sim::Buildings` validates placement (slope, overlap, protected city zones, resource requirement) and crop growth is computed from the clock on demand.
+`buildings.json` and `crops.json` define placeable buildings (footprint, required site quality, worker/input/output slots, accepted resources, cost, crop) and crops (growth days, yield); `core_sim::Buildings` validates placement and provides typed worker assignment, production input/output, and building-to-storage transfer APIs. Farms output wheat, mines output iron ore, and dedicated stores accept each resource. Production scheduling and automatic hauling are not yet run by the simulation.
 
 Simulation runs on `hecs`, maths on `glam`, rendering on `wgpu` (lit, fogged, chunked terrain meshes + instanced agents).
 

@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use core_sim::ChunkCoord;
+use core_sim::{Building, ChunkCoord};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::camera::Camera;
-use crate::mesh::{capsule_mesh, terrain_chunk_mesh, Vertex};
+use crate::mesh::{building_mesh, humanoid_mesh, terrain_chunk_mesh, Vertex};
 use crate::ui::GameUi;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -36,6 +36,8 @@ pub struct AgentInstance {
     /// Linear-ish sRGB tint (a unused).
     pub color: [f32; 4],
 }
+
+pub type BuildingInstance = AgentInstance;
 
 struct GpuMesh {
     vertices: wgpu::Buffer,
@@ -73,9 +75,14 @@ pub struct Renderer {
     globals_bind: wgpu::BindGroup,
     terrain_pipeline: wgpu::RenderPipeline,
     agent_pipeline: wgpu::RenderPipeline,
+    building_pipeline: wgpu::RenderPipeline,
     seed: u64,
     chunks: HashMap<ChunkCoord, GpuMesh>,
     agent_mesh: GpuMesh,
+    building_meshes: HashMap<String, GpuMesh>,
+    building_instances: wgpu::Buffer,
+    building_instance_capacity: usize,
+    building_instance_count: u32,
     instances: wgpu::Buffer,
     instance_capacity: usize,
     instance_count: u32,
@@ -236,13 +243,21 @@ impl Renderer {
             "agents",
             "vs_agent",
             "fs_agent",
-            &[vertex_layout.clone(), instance_layout],
+            &[vertex_layout.clone(), instance_layout.clone()],
+        );
+        let building_pipeline = make_pipeline(
+            "buildings",
+            "vs_agent",
+            "fs_agent",
+            &[vertex_layout.clone(), instance_layout.clone()],
         );
 
-        let (cv, ci) = capsule_mesh();
-        let agent_mesh = GpuMesh::new(&device, "capsule", &cv, &ci);
+        let (cv, ci) = humanoid_mesh();
+        let agent_mesh = GpuMesh::new(&device, "humanoid", &cv, &ci);
         let instance_capacity = 1024;
         let instances = Self::make_instance_buffer(&device, instance_capacity);
+        let building_instance_capacity = 128;
+        let building_instances = Self::make_instance_buffer(&device, building_instance_capacity);
         let (depth_view, msaa_view) = Self::make_targets(&device, &config, sample_count);
 
         Ok(Self {
@@ -257,9 +272,14 @@ impl Renderer {
             globals_bind,
             terrain_pipeline,
             agent_pipeline,
+            building_pipeline,
             seed,
             chunks: HashMap::new(),
             agent_mesh,
+            building_meshes: HashMap::new(),
+            building_instances,
+            building_instance_capacity,
+            building_instance_count: 0,
             instances,
             instance_capacity,
             instance_count: 0,
@@ -363,6 +383,7 @@ impl Renderer {
         &mut self,
         camera: &Camera,
         agents: &[AgentInstance],
+        buildings: &[Building],
         ui: &mut GameUi,
         pixels_per_point: f32,
     ) -> Result<(), wgpu::SurfaceError> {
@@ -373,6 +394,47 @@ impl Renderer {
         self.queue
             .write_buffer(&self.instances, 0, bytemuck::cast_slice(agents));
         self.instance_count = agents.len() as u32;
+
+        let mut building_instances = Vec::with_capacity(buildings.len());
+        for building in buildings {
+            if !self.building_meshes.contains_key(&building.def) {
+                let (vertices, indices) = building_mesh(building.footprint, &building.def);
+                self.building_meshes.insert(
+                    building.def.clone(),
+                    GpuMesh::new(&self.device, &building.def, &vertices, &indices),
+                );
+            }
+            let x = building.footprint.x as f32;
+            let z = building.footprint.z as f32;
+            let y = core_sim::height_at(
+                self.seed,
+                x + building.footprint.width as f32 * 0.5,
+                z + building.footprint.depth as f32 * 0.5,
+            );
+            let color = building_color(&building.def);
+            building_instances.push((
+                building.def.as_str(),
+                BuildingInstance {
+                    pos: [x, y, z, 0.0],
+                    color,
+                },
+            ));
+        }
+        if building_instances.len() > self.building_instance_capacity {
+            self.building_instance_capacity = building_instances.len().next_power_of_two();
+            self.building_instances =
+                Self::make_instance_buffer(&self.device, self.building_instance_capacity);
+        }
+        let gpu_building_instances: Vec<BuildingInstance> = building_instances
+            .iter()
+            .map(|(_, instance)| *instance)
+            .collect();
+        self.queue.write_buffer(
+            &self.building_instances,
+            0,
+            bytemuck::cast_slice(&gpu_building_instances),
+        );
+        self.building_instance_count = gpu_building_instances.len() as u32;
 
         let eye = camera.eye();
         let globals = Globals {
@@ -438,6 +500,18 @@ impl Renderer {
                 pass.set_index_buffer(self.agent_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.agent_mesh.index_count, 0, 0..self.instance_count);
             }
+            if self.building_instance_count > 0 {
+                pass.set_pipeline(&self.building_pipeline);
+                for (index, (definition, _)) in building_instances.iter().enumerate() {
+                    let Some(mesh) = self.building_meshes.get(*definition) else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_vertex_buffer(1, self.building_instances.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, index as u32..index as u32 + 1);
+                }
+            }
         }
         let ui_commands = ui.paint(
             &self.device,
@@ -454,5 +528,17 @@ impl Renderer {
         );
         frame.present();
         Ok(())
+    }
+}
+
+fn building_color(definition: &str) -> [f32; 4] {
+    match definition {
+        "house" => [0.62, 0.43, 0.30, 1.0],
+        "farm" => [0.42, 0.60, 0.32, 1.0],
+        "iron_mine" => [0.42, 0.39, 0.34, 1.0],
+        "workshop" => [0.60, 0.55, 0.45, 1.0],
+        "wheat_storage" => [0.72, 0.60, 0.34, 1.0],
+        "ore_storage" => [0.48, 0.49, 0.50, 1.0],
+        _ => [0.58, 0.47, 0.35, 1.0],
     }
 }

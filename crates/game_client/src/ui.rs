@@ -213,7 +213,7 @@ impl GameUi {
                         ui.small(status);
                     }
 
-                    let categories = ["Mines", "Farms", "Housing", "Industry"];
+                    let categories = ["Mines", "Farms", "Housing", "Industry", "Storage"];
                     for category in categories {
                         let entries: Vec<_> = building_defs
                             .iter()
@@ -241,6 +241,18 @@ impl GameUi {
                                     .collect::<Vec<_>>()
                                     .join(", ");
                                 ui.small(format!("Cost: {cost} (not charged in prototype)"));
+                            }
+                            if !definition.output_resources.is_empty() {
+                                ui.small(format!(
+                                    "Output: {}",
+                                    definition.output_resources.join(", ")
+                                ));
+                            }
+                            if definition.storage {
+                                ui.small(format!(
+                                    "Stores: {} per resource, stack limit {}",
+                                    definition.input_slots, definition.stack_limit
+                                ));
                             }
                             if let Some(resource) = &definition.requires_resource {
                                 if definition.min_resource_richness.is_some() {
@@ -365,7 +377,9 @@ fn matches_category(definition: &content::BuildingDef, category: &str) -> bool {
             definition.requires_resource.is_none()
                 && definition.crop.is_none()
                 && !definition.dwelling
+                && !definition.storage
         }
+        "Storage" => definition.storage,
         _ => false,
     }
 }

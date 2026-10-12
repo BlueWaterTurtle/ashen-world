@@ -1,6 +1,8 @@
 use crate::chunk::WorldPos;
 use crate::clock::GameClock;
+use crate::npc::{Inventory, ItemStack};
 use crate::terrain::{fertility_at, height_at, resource_richness_at, MAX_STEP_HEIGHT};
+use crate::world::Entity;
 
 /// Axis-aligned footprint in world cells: `[x, x + width) x [z, z + depth)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +40,151 @@ pub struct Building {
     pub footprint: Footprint,
     /// Tick at which the current crop was planted, for farms.
     pub planted_tick: Option<u64>,
+    pub workers: Vec<Option<Entity>>,
+    pub inputs: SlotInventory,
+    pub outputs: SlotInventory,
+    pub is_storage: bool,
+}
+
+/// Finite storage where each slot holds one resource type up to `stack_limit`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SlotInventory {
+    slots: Vec<Option<ItemStack>>,
+    stack_limit: u32,
+    allowed_resources: Vec<String>,
+}
+
+impl SlotInventory {
+    pub fn new(slot_count: usize, stack_limit: u32, allowed_resources: Vec<String>) -> Self {
+        Self {
+            slots: vec![None; slot_count],
+            stack_limit,
+            allowed_resources,
+        }
+    }
+
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn stack_limit(&self) -> u32 {
+        self.stack_limit
+    }
+
+    pub fn count_of(&self, item: &str) -> u32 {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|stack| stack.item == item)
+            .map(|stack| stack.count)
+            .sum()
+    }
+
+    pub fn items(&self) -> impl Iterator<Item = &ItemStack> {
+        self.slots.iter().flatten()
+    }
+
+    pub fn insert_resource(&mut self, item: &str, count: u32) -> u32 {
+        self.insert(item, count)
+    }
+
+    pub fn remove_resource(&mut self, item: &str, count: u32) -> u32 {
+        self.remove(item, count)
+    }
+
+    fn available_for(&self, item: &str) -> u32 {
+        if self.stack_limit == 0
+            || (!self.allowed_resources.is_empty()
+                && !self
+                    .allowed_resources
+                    .iter()
+                    .any(|resource| resource == item))
+        {
+            return 0;
+        }
+        if let Some(stack) = self.slots.iter().flatten().find(|stack| stack.item == item) {
+            self.stack_limit.saturating_sub(stack.count)
+        } else if self.slots.iter().any(Option::is_none) {
+            self.stack_limit
+        } else {
+            0
+        }
+    }
+
+    fn insert(&mut self, item: &str, count: u32) -> u32 {
+        let accepted = count.min(self.available_for(item));
+        if accepted == 0 {
+            return 0;
+        }
+        if let Some(stack) = self
+            .slots
+            .iter_mut()
+            .flatten()
+            .find(|stack| stack.item == item)
+        {
+            stack.count += accepted;
+        } else if let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(ItemStack::new(item, accepted));
+        }
+        accepted
+    }
+
+    fn remove(&mut self, item: &str, count: u32) -> u32 {
+        let mut remaining = count;
+        for slot in &mut self.slots {
+            if let Some(stack) = slot {
+                if stack.item == item {
+                    let taken = stack.count.min(remaining);
+                    stack.count -= taken;
+                    remaining -= taken;
+                    if stack.count == 0 {
+                        *slot = None;
+                    }
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        count - remaining
+    }
+}
+
+/// Initial worker and storage capacity for a newly placed building.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildingLogistics {
+    pub worker_slots: usize,
+    pub input_slots: usize,
+    pub output_slots: usize,
+    pub stack_limit: u32,
+    pub input_resources: Vec<String>,
+    pub output_resources: Vec<String>,
+    pub is_storage: bool,
+}
+
+impl Default for BuildingLogistics {
+    fn default() -> Self {
+        Self {
+            worker_slots: 0,
+            input_slots: 0,
+            output_slots: 0,
+            stack_limit: 100,
+            input_resources: Vec::new(),
+            output_resources: Vec::new(),
+            is_storage: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogisticsError {
+    BuildingNotFound,
+    NoWorkerSlots,
+    WorkerAlreadyAssigned,
+    WorkerAssignedElsewhere,
+    WorkerNotAssigned,
+    SameBuilding,
+    NotStorage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,13 +275,257 @@ impl Buildings {
         fp: Footprint,
         rules: &PlacementRules,
     ) -> Result<usize, PlaceError> {
+        self.place_with_logistics(seed, def, fp, rules, BuildingLogistics::default())
+    }
+
+    pub fn place_with_logistics(
+        &mut self,
+        seed: u64,
+        def: &str,
+        fp: Footprint,
+        rules: &PlacementRules,
+        logistics: BuildingLogistics,
+    ) -> Result<usize, PlaceError> {
         self.validate(seed, fp, rules)?;
         self.buildings.push(Building {
             def: def.to_string(),
             footprint: fp,
             planted_tick: None,
+            workers: vec![None; logistics.worker_slots],
+            inputs: SlotInventory::new(
+                logistics.input_slots,
+                logistics.stack_limit,
+                logistics.input_resources.clone(),
+            ),
+            outputs: SlotInventory::new(
+                logistics.output_slots,
+                logistics.stack_limit,
+                logistics.output_resources.clone(),
+            ),
+            is_storage: logistics.is_storage,
         });
         Ok(self.buildings.len() - 1)
+    }
+
+    pub fn assign_worker(
+        &mut self,
+        building_index: usize,
+        worker: Entity,
+    ) -> Result<usize, LogisticsError> {
+        let building = self
+            .buildings
+            .get(building_index)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        if building.workers.contains(&Some(worker)) {
+            return Err(LogisticsError::WorkerAlreadyAssigned);
+        }
+        if self.buildings.iter().enumerate().any(|(index, building)| {
+            index != building_index && building.workers.contains(&Some(worker))
+        }) {
+            return Err(LogisticsError::WorkerAssignedElsewhere);
+        }
+        let building = self
+            .buildings
+            .get_mut(building_index)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        let slot = building
+            .workers
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(LogisticsError::NoWorkerSlots)?;
+        *slot = Some(worker);
+        Ok(building
+            .workers
+            .iter()
+            .position(|slot| *slot == Some(worker))
+            .expect("worker was just assigned"))
+    }
+
+    pub fn unassign_worker(
+        &mut self,
+        building_index: usize,
+        worker: Entity,
+    ) -> Result<(), LogisticsError> {
+        let building = self
+            .buildings
+            .get_mut(building_index)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        let slot = building
+            .workers
+            .iter_mut()
+            .find(|slot| **slot == Some(worker))
+            .ok_or(LogisticsError::WorkerNotAssigned)?;
+        *slot = None;
+        Ok(())
+    }
+
+    pub fn transfer_to_input(
+        &mut self,
+        building_index: usize,
+        worker: Entity,
+        inventory: &mut Inventory,
+        item: &str,
+        requested: u32,
+    ) -> Result<u32, LogisticsError> {
+        let building = self
+            .buildings
+            .get_mut(building_index)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        if !building.workers.contains(&Some(worker)) {
+            return Err(LogisticsError::WorkerNotAssigned);
+        }
+        let transfer = requested
+            .min(inventory.count_of(item))
+            .min(building.inputs.available_for(item));
+        if transfer == 0 {
+            return Ok(0);
+        }
+        let removed = inventory.remove(item, transfer);
+        debug_assert!(removed);
+        Ok(building.inputs.insert(item, transfer))
+    }
+
+    pub fn transfer_from_output(
+        &mut self,
+        building_index: usize,
+        worker: Entity,
+        inventory: &mut Inventory,
+        item: &str,
+        requested: u32,
+    ) -> Result<u32, LogisticsError> {
+        let building = self
+            .buildings
+            .get_mut(building_index)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        if !building.workers.contains(&Some(worker)) {
+            return Err(LogisticsError::WorkerNotAssigned);
+        }
+        let transfer = requested.min(building.outputs.count_of(item));
+        if transfer == 0 {
+            return Ok(0);
+        }
+        let removed = building.outputs.remove(item, transfer);
+        inventory.add(item, removed);
+        Ok(removed)
+    }
+
+    pub fn transfer_from_input(
+        &mut self,
+        building_index: usize,
+        worker: Entity,
+        inventory: &mut Inventory,
+        item: &str,
+        requested: u32,
+    ) -> Result<u32, LogisticsError> {
+        let building = self
+            .buildings
+            .get_mut(building_index)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        if !building.workers.contains(&Some(worker)) {
+            return Err(LogisticsError::WorkerNotAssigned);
+        }
+        let transfer = requested.min(building.inputs.count_of(item));
+        let removed = building.inputs.remove(item, transfer);
+        inventory.add(item, removed);
+        Ok(removed)
+    }
+
+    pub fn transfer_input_to_output(
+        &mut self,
+        building_index: usize,
+        worker: Entity,
+        item: &str,
+        requested: u32,
+    ) -> Result<u32, LogisticsError> {
+        let building = self
+            .buildings
+            .get_mut(building_index)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        if !building.is_storage {
+            return Err(LogisticsError::NotStorage);
+        }
+        if !building.workers.contains(&Some(worker)) {
+            return Err(LogisticsError::WorkerNotAssigned);
+        }
+        let transfer = requested
+            .min(building.inputs.count_of(item))
+            .min(building.outputs.available_for(item));
+        let removed = building.inputs.remove(item, transfer);
+        let inserted = building.outputs.insert(item, removed);
+        debug_assert_eq!(removed, inserted);
+        Ok(inserted)
+    }
+
+    pub fn transfer_output_to_input(
+        &mut self,
+        source_index: usize,
+        destination_index: usize,
+        worker: Entity,
+        item: &str,
+        requested: u32,
+    ) -> Result<u32, LogisticsError> {
+        if source_index == destination_index {
+            return Err(LogisticsError::SameBuilding);
+        }
+        let (source, destination) = if source_index < destination_index {
+            let (before, after) = self.buildings.split_at_mut(destination_index);
+            (before.get_mut(source_index), after.first_mut())
+        } else {
+            let (before, after) = self.buildings.split_at_mut(source_index);
+            (after.first_mut(), before.get_mut(destination_index))
+        };
+        let source = source.ok_or(LogisticsError::BuildingNotFound)?;
+        let destination = destination.ok_or(LogisticsError::BuildingNotFound)?;
+        if !source.workers.contains(&Some(worker)) && !destination.workers.contains(&Some(worker)) {
+            return Err(LogisticsError::WorkerNotAssigned);
+        }
+        if !destination.is_storage {
+            return Err(LogisticsError::NotStorage);
+        }
+        let transfer = requested
+            .min(source.outputs.count_of(item))
+            .min(destination.inputs.available_for(item));
+        if transfer == 0 {
+            return Ok(0);
+        }
+        let removed = source.outputs.remove(item, transfer);
+        let inserted = destination.inputs.insert(item, removed);
+        debug_assert_eq!(removed, inserted);
+        Ok(inserted)
+    }
+
+    pub fn consume_input(
+        &mut self,
+        building_index: usize,
+        worker: Entity,
+        item: &str,
+        requested: u32,
+    ) -> Result<u32, LogisticsError> {
+        let building = self
+            .buildings
+            .get_mut(building_index)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        if !building.workers.contains(&Some(worker)) {
+            return Err(LogisticsError::WorkerNotAssigned);
+        }
+        Ok(building.inputs.remove(item, requested))
+    }
+
+    pub fn produce_output(
+        &mut self,
+        building_index: usize,
+        worker: Entity,
+        item: &str,
+        count: u32,
+    ) -> Result<u32, LogisticsError> {
+        let building = self
+            .buildings
+            .get_mut(building_index)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        if !building.workers.contains(&Some(worker)) {
+            return Err(LogisticsError::WorkerNotAssigned);
+        }
+        Ok(building.outputs.insert(item, count))
     }
 
     /// True if a cell is blocked by a building (for pathfinding obstacles).
@@ -268,6 +659,102 @@ mod tests {
             Err(PlaceError::InsufficientFertility)
         );
         assert!(b.blocks((1, 1)) && !b.blocks((5, 5)));
+    }
+
+    #[test]
+    fn worker_produces_and_hauls_resources_into_typed_storage() {
+        let mut buildings = Buildings::default();
+        let rules = PlacementRules::default();
+        let farm = buildings
+            .place_with_logistics(
+                1,
+                "farm",
+                fp(0, 0, 1, 1),
+                &rules,
+                BuildingLogistics {
+                    worker_slots: 1,
+                    input_slots: 1,
+                    output_slots: 1,
+                    stack_limit: 5,
+                    input_resources: vec!["wheat_seed".into()],
+                    output_resources: vec!["wheat".into()],
+                    is_storage: false,
+                },
+            )
+            .unwrap();
+        let storage = buildings
+            .place_with_logistics(
+                1,
+                "wheat_storage",
+                fp(5, 0, 1, 1),
+                &rules,
+                BuildingLogistics {
+                    worker_slots: 1,
+                    input_slots: 2,
+                    output_slots: 2,
+                    stack_limit: 3,
+                    input_resources: vec!["wheat".into()],
+                    output_resources: vec!["wheat".into()],
+                    is_storage: true,
+                },
+            )
+            .unwrap();
+
+        let farm_worker = Entity(1);
+        let storage_worker = Entity(2);
+        assert_eq!(buildings.assign_worker(farm, farm_worker), Ok(0));
+        assert_eq!(
+            buildings.assign_worker(storage, farm_worker),
+            Err(LogisticsError::WorkerAssignedElsewhere)
+        );
+        assert_eq!(
+            buildings.assign_worker(farm, farm_worker),
+            Err(LogisticsError::WorkerAlreadyAssigned)
+        );
+
+        let mut farm_inventory = Inventory::default();
+        farm_inventory.add("wheat_seed", 10);
+        assert_eq!(
+            buildings.transfer_to_input(farm, farm_worker, &mut farm_inventory, "wheat_seed", 8),
+            Ok(5)
+        );
+        assert_eq!(farm_inventory.count_of("wheat_seed"), 5);
+        assert_eq!(
+            buildings.consume_input(farm, farm_worker, "wheat_seed", 2),
+            Ok(2)
+        );
+        assert_eq!(
+            buildings.produce_output(farm, farm_worker, "wheat", 8),
+            Ok(5)
+        );
+        assert_eq!(
+            buildings.produce_output(farm, farm_worker, "iron_ore", 1),
+            Ok(0)
+        );
+
+        assert_eq!(
+            buildings.transfer_output_to_input(farm, storage, farm_worker, "wheat", 5),
+            Ok(3)
+        );
+        assert_eq!(buildings.buildings[farm].outputs.count_of("wheat"), 2);
+        assert_eq!(buildings.buildings[storage].inputs.count_of("wheat"), 3);
+        assert_eq!(buildings.assign_worker(storage, storage_worker), Ok(0));
+        assert_eq!(
+            buildings.transfer_input_to_output(storage, storage_worker, "wheat", 3),
+            Ok(3)
+        );
+        let mut storage_inventory = Inventory::default();
+        assert_eq!(
+            buildings.transfer_from_output(
+                storage,
+                storage_worker,
+                &mut storage_inventory,
+                "wheat",
+                10,
+            ),
+            Ok(3)
+        );
+        assert_eq!(storage_inventory.count_of("wheat"), 3);
     }
 
     #[test]

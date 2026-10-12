@@ -84,6 +84,27 @@ pub struct BuildingDef {
     /// Minimum footprint-average soil fertility, in `[0, 1]`.
     #[serde(default)]
     pub min_fertility: Option<f32>,
+    /// Number of workers that can be assigned to this building.
+    #[serde(default)]
+    pub worker_slots: usize,
+    /// Number of distinct resource stacks accepted as production inputs.
+    #[serde(default)]
+    pub input_slots: usize,
+    /// Number of distinct resource stacks held as production outputs.
+    #[serde(default)]
+    pub output_slots: usize,
+    /// Maximum quantity of one resource type per input/output slot.
+    #[serde(default = "default_building_stack_limit")]
+    pub stack_limit: u32,
+    /// Resource types accepted by production inputs or storage.
+    #[serde(default)]
+    pub input_resources: Vec<String>,
+    /// Resource types this building can produce or hold for dispatch.
+    #[serde(default)]
+    pub output_resources: Vec<String>,
+    /// Whether this building accepts output transfers from other buildings.
+    #[serde(default)]
+    pub storage: bool,
     /// Whether residents can live here.
     #[serde(default)]
     pub dwelling: bool,
@@ -93,6 +114,10 @@ pub struct BuildingDef {
     /// Crop id grown here, if this is a farm.
     #[serde(default)]
     pub crop: Option<String>,
+}
+
+fn default_building_stack_limit() -> u32 {
+    100
 }
 
 /// A crop: grows over in-game days; the clock drives growth, so there is no per-tick work.
@@ -244,6 +269,17 @@ pub fn load_content(dir: impl AsRef<Path>) -> Result<Content, ContentError> {
                 format!("building '{}' has a site threshold outside [0, 1]", b.id),
             ));
         }
+        if b.stack_limit == 0
+            || (!b.input_resources.is_empty() && b.input_slots == 0)
+            || (!b.output_resources.is_empty() && b.output_slots == 0)
+            || (b.storage
+                && (b.worker_slots == 0 || b.input_slots == 0 || b.input_resources.is_empty()))
+        {
+            return Err(invalid(
+                &bdp,
+                format!("building '{}' has incompatible logistics slots", b.id),
+            ));
+        }
         if let Some(c) = &b.crop {
             if !crops.iter().any(|x| &x.id == c) {
                 return Err(invalid(
@@ -354,9 +390,23 @@ mod tests {
         let c = load_content(assets_dir()).unwrap();
         let farm = c.buildings.iter().find(|b| b.id == "farm").unwrap();
         assert_eq!(farm.crop.as_deref(), Some("wheat"));
+        assert_eq!(farm.output_resources, vec!["wheat"]);
         assert!(c.buildings.iter().any(|b| b.dwelling));
         let mine = c.buildings.iter().find(|b| b.id == "iron_mine").unwrap();
         assert_eq!(mine.requires_resource.as_deref(), Some("iron_ore"));
+        assert_eq!(mine.output_resources, vec!["iron_ore"]);
+        let wheat_store = c
+            .buildings
+            .iter()
+            .find(|b| b.id == "wheat_storage")
+            .unwrap();
+        assert!(wheat_store.storage);
+        assert_eq!(wheat_store.input_resources, vec!["wheat"]);
+        let ore_store = c.buildings.iter().find(|b| b.id == "ore_storage").unwrap();
+        assert!(ore_store.storage);
+        assert_eq!(ore_store.input_resources, vec!["iron_ore"]);
+        let wheat = c.crops.iter().find(|crop| crop.id == "wheat").unwrap();
+        assert_eq!(wheat.yield_resource, "wheat");
     }
 
     #[test]

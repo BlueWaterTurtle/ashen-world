@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use camera::Camera;
 use core_sim::{
-    height_at, Behavior, Buildings, Footprint, PlacementRules, World, WorldConfig, WorldPos,
-    TICK_DT,
+    height_at, Behavior, BuildingLogistics, Buildings, Footprint, PlacementRules, World,
+    WorldConfig, WorldPos, TICK_DT,
 };
 use glam::{Mat4, Vec3, Vec4};
 use renderer::{AgentInstance, Renderer};
@@ -199,10 +199,22 @@ impl App {
                 minimum_fertility: definition.min_fertility,
                 building_margin: 0,
             };
-            match self
-                .buildings
-                .place(self.world.seed, &definition.id, footprint, &rules)
-            {
+            let logistics = BuildingLogistics {
+                worker_slots: definition.worker_slots,
+                input_slots: definition.input_slots,
+                output_slots: definition.output_slots,
+                stack_limit: definition.stack_limit,
+                input_resources: definition.input_resources.clone(),
+                output_resources: definition.output_resources.clone(),
+                is_storage: definition.storage,
+            };
+            match self.buildings.place_with_logistics(
+                self.world.seed,
+                &definition.id,
+                footprint,
+                &rules,
+                logistics,
+            ) {
                 Ok(_) => {
                     self.build_status = Some(format!("Placed {}.", definition.name));
                     self.build_mode = None;
@@ -366,7 +378,13 @@ impl App {
                 .window
                 .as_ref()
                 .map_or(1.0, |window| window.scale_factor() as f32);
-            match r.render(&self.camera, &self.agent_instances, ui, pixels_per_point) {
+            match r.render(
+                &self.camera,
+                &self.agent_instances,
+                &self.buildings.buildings,
+                ui,
+                pixels_per_point,
+            ) {
                 Ok(()) => {}
                 Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                     if let Some(w) = &self.window {

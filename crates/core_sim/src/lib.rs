@@ -12,8 +12,8 @@ pub mod world;
 
 pub use behavior::Behavior;
 pub use building::{
-    average_fertility, average_resource_richness, crop_progress, Building, Buildings, Footprint,
-    PlaceError, PlacementRules, ResourceNode,
+    average_fertility, average_resource_richness, crop_progress, Building, BuildingLogistics,
+    Buildings, Footprint, LogisticsError, PlaceError, PlacementRules, ResourceNode, SlotInventory,
 };
 pub use chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
 pub use clock::GameClock;

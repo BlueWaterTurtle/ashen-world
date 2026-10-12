@@ -1,4 +1,4 @@
 [
-  { "id": "wheat", "name": "Wheat", "growth_days": 3.0, "yield_amount": 20.0, "yield_resource": "grain" },
+  { "id": "wheat", "name": "Wheat", "growth_days": 3.0, "yield_amount": 20.0, "yield_resource": "wheat" },
   { "id": "hemp", "name": "Hemp", "growth_days": 5.0, "yield_amount": 12.0, "yield_resource": "fiber" }
 ]
