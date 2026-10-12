@@ -1,0 +1,148 @@
+use crate::chunk::{ChunkCoord, CHUNK_SIZE};
+use std::collections::HashMap;
+
+/// Height samples per chunk edge (one sample per meter-cell).
+pub const CELLS: usize = CHUNK_SIZE as usize;
+
+/// Deterministic hash of lattice point + seed to `[0, 1)`.
+fn lattice(seed: u64, x: i64, z: i64) -> f32 {
+    let mut h = seed ^ (x as u64).wrapping_mul(0x9E37_79B1_85EB_CA87);
+    h ^= (z as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    h = (h ^ (h >> 33)).wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    h = (h ^ (h >> 33)).wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    h ^= h >> 33;
+    (h >> 40) as f32 / (1u64 << 24) as f32
+}
+
+fn smooth(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Smooth value noise at world coords with feature size `scale`, in `[0, 1)`.
+fn value_noise(seed: u64, x: f32, z: f32, scale: f32) -> f32 {
+    let (fx, fz) = (x / scale, z / scale);
+    let (x0, z0) = (fx.floor(), fz.floor());
+    let (tx, tz) = (smooth(fx - x0), smooth(fz - z0));
+    let (x0, z0) = (x0 as i64, z0 as i64);
+    let a = lattice(seed, x0, z0);
+    let b = lattice(seed, x0 + 1, z0);
+    let c = lattice(seed, x0, z0 + 1);
+    let d = lattice(seed, x0 + 1, z0 + 1);
+    let top = a + (b - a) * tx;
+    let bot = c + (d - c) * tx;
+    top + (bot - top) * tz
+}
+
+/// Terrain height in meters at a world position (two octaves of noise).
+pub fn height_at(seed: u64, x: f32, z: f32) -> f32 {
+    let base = value_noise(seed, x, z, 128.0);
+    let detail = value_noise(seed.wrapping_add(1), x, z, 24.0);
+    (base * 0.8 + detail * 0.2) * 40.0
+}
+
+/// Heightmap for one chunk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkTerrain {
+    pub coord: ChunkCoord,
+    /// Row-major `CELLS * CELLS` heights; index = `z * CELLS + x`.
+    pub heights: Vec<f32>,
+}
+
+impl ChunkTerrain {
+    pub fn generate(seed: u64, coord: ChunkCoord) -> Self {
+        let (ox, oz) = coord.origin();
+        let mut heights = Vec::with_capacity(CELLS * CELLS);
+        for z in 0..CELLS {
+            for x in 0..CELLS {
+                heights.push(height_at(seed, ox + x as f32 + 0.5, oz + z as f32 + 0.5));
+            }
+        }
+        Self { coord, heights }
+    }
+
+    pub fn height(&self, x: usize, z: usize) -> f32 {
+        self.heights[z * CELLS + x]
+    }
+}
+
+/// Keeps the set of terrain chunks within a radius of a center chunk loaded.
+#[derive(Debug, Clone)]
+pub struct ChunkStreamer {
+    seed: u64,
+    pub radius: i32,
+    loaded: HashMap<ChunkCoord, ChunkTerrain>,
+}
+
+impl ChunkStreamer {
+    pub fn new(seed: u64, radius: i32) -> Self {
+        Self {
+            seed,
+            radius: radius.max(0),
+            loaded: HashMap::new(),
+        }
+    }
+
+    /// Load missing chunks and unload distant ones. Returns `(loaded, unloaded)` counts.
+    pub fn update(&mut self, center: ChunkCoord) -> (usize, usize) {
+        let r = self.radius;
+        let before = self.loaded.len();
+        self.loaded
+            .retain(|c, _| (c.x - center.x).abs() <= r && (c.z - center.z).abs() <= r);
+        let unloaded = before - self.loaded.len();
+        let mut loaded = 0;
+        for z in center.z - r..=center.z + r {
+            for x in center.x - r..=center.x + r {
+                let c = ChunkCoord::new(x, z);
+                if let std::collections::hash_map::Entry::Vacant(e) = self.loaded.entry(c) {
+                    e.insert(ChunkTerrain::generate(self.seed, c));
+                    loaded += 1;
+                }
+            }
+        }
+        (loaded, unloaded)
+    }
+
+    pub fn get(&self, c: ChunkCoord) -> Option<&ChunkTerrain> {
+        self.loaded.get(&c)
+    }
+
+    pub fn len(&self) -> usize {
+        self.loaded.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.loaded.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terrain_is_deterministic_and_bounded() {
+        let c = ChunkCoord::new(-1, 2);
+        let a = ChunkTerrain::generate(5, c);
+        assert_eq!(a, ChunkTerrain::generate(5, c));
+        assert_ne!(a, ChunkTerrain::generate(6, c));
+        assert!(a.heights.iter().all(|h| (0.0..40.0).contains(h)));
+    }
+
+    #[test]
+    fn terrain_is_continuous_across_chunk_borders() {
+        let a = ChunkTerrain::generate(9, ChunkCoord::new(0, 0));
+        let b = ChunkTerrain::generate(9, ChunkCoord::new(1, 0));
+        assert!((a.height(CELLS - 1, 3) - b.height(0, 3)).abs() < 2.0);
+    }
+
+    #[test]
+    fn streamer_loads_and_unloads() {
+        let mut s = ChunkStreamer::new(1, 1);
+        assert_eq!(s.update(ChunkCoord::new(0, 0)), (9, 0));
+        assert_eq!(s.update(ChunkCoord::new(0, 0)), (0, 0));
+        assert_eq!(s.update(ChunkCoord::new(1, 0)), (3, 3));
+        assert_eq!(s.len(), 9);
+        assert!(s.get(ChunkCoord::new(-1, 0)).is_none());
+        assert!(s.get(ChunkCoord::new(2, 1)).is_some());
+    }
+}

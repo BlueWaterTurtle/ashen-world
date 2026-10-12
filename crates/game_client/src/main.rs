@@ -1,7 +1,7 @@
 mod camera;
 
 use camera::Camera;
-use core_sim::{World, WorldConfig, CHUNK_SIZE, TICK_DT};
+use core_sim::{ChunkStreamer, World, WorldConfig, WorldPos, CHUNK_SIZE, TICK_DT};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -32,6 +32,7 @@ struct Stats {
 
 struct App {
     world: World,
+    terrain: ChunkStreamer,
     camera: Camera,
     input: Input,
     accumulator: f32,
@@ -45,6 +46,7 @@ impl App {
     fn new(world: World) -> Self {
         let now = Instant::now();
         Self {
+            terrain: ChunkStreamer::new(world.seed, 3),
             world,
             camera: Camera::default(),
             input: Input::default(),
@@ -78,6 +80,8 @@ impl App {
             axis(i.forward, i.back) * speed,
             axis(i.up, i.down) * speed,
         );
+        let cam = WorldPos::new(self.camera.position[0], 0.0, self.camera.position[2]);
+        self.terrain.update(cam.chunk());
         self.render();
         self.stats.frames += 1;
         let elapsed = now - self.stats.window_start;
@@ -110,10 +114,24 @@ impl App {
         let Ok(mut buf) = surface.buffer_mut() else {
             return;
         };
-        buf.fill(0x0020_1c1a);
+        let terrain = &self.terrain;
         self.camera.aspect = size.width as f32 / size.height as f32;
         let px_per_unit = size.height as f32 / (CHUNK_SIZE * 4.0);
         let (cx, cz) = (self.camera.position[0], self.camera.position[2]);
+        for py in 0..size.height as usize {
+            for px in 0..size.width as usize {
+                let wx = (px as f32 - size.width as f32 / 2.0) / px_per_unit + cx;
+                let wz = (py as f32 - size.height as f32 / 2.0) / px_per_unit + cz;
+                let wp = WorldPos::new(wx, 0.0, wz);
+                let l = wp.local();
+                let shade = terrain
+                    .get(wp.chunk())
+                    .map(|t| t.height(l.x as usize, l.z as usize))
+                    .map_or(0.0, |h| h / 40.0);
+                let v = (24.0 + shade * 70.0) as u32;
+                buf[py * size.width as usize + px] = (v << 16) | ((v * 9 / 10) << 8) | (v * 8 / 10);
+            }
+        }
         for p in &self.world.positions {
             let sx = (p.x - cx) * px_per_unit + size.width as f32 / 2.0;
             let sy = (p.z - cz) * px_per_unit + size.height as f32 / 2.0;
