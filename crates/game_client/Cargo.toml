@@ -8,4 +8,7 @@ publish.workspace = true
 core_sim = { path = "../core_sim" }
 content = { path = "../content" }
 winit = "0.30"
-softbuffer = "0.4"
+wgpu = "22.1"
+glam = "0.29"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.3"

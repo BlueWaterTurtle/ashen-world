@@ -11,9 +11,25 @@ pub const TICKS_PER_SECOND: u32 = 30;
 /// Seconds per simulation tick.
 pub const TICK_DT: f32 = 1.0 / TICKS_PER_SECOND as f32;
 
-/// Opaque entity handle (index into component storage).
+/// Opaque, stable handle to an agent: its spawn index. Spawn order is deterministic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Entity(pub u32);
+
+/// Components stored in the ECS. Every agent always has all of them, so all agents live
+/// in one archetype and iteration order equals spawn order (needed for determinism).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Position(pub WorldPos);
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Velocity(pub WorldPos);
+/// Remaining waypoints (cell coordinates, in order); `None` when idle.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Path(pub Option<VecDeque<Cell>>);
+/// Index into [`World::behaviors`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BehaviorId(pub usize);
+/// Ticks remaining before an idle agent may pick a new destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Pause(pub u32);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorldConfig {
@@ -39,20 +55,13 @@ impl Default for WorldConfig {
     }
 }
 
-/// Struct-of-arrays world: component vectors indexed by entity id.
-#[derive(Debug, Clone, PartialEq)]
+/// The simulation world: an ECS holding agents plus global sim state.
 pub struct World {
     pub seed: u64,
     pub tick: u64,
-    pub positions: Vec<WorldPos>,
-    pub velocities: Vec<WorldPos>,
-    /// Remaining waypoints (cell centers, in order) for each entity, if it is navigating.
-    pub paths: Vec<Option<VecDeque<Cell>>>,
+    pub ecs: hecs::World,
+    ids: Vec<hecs::Entity>,
     pub behaviors: Vec<Behavior>,
-    /// Index into `behaviors` for each entity.
-    pub behavior_of: Vec<usize>,
-    /// Ticks remaining before an idle entity may pick a new destination.
-    pub pause: Vec<u32>,
     pub max_path_requests_per_tick: usize,
     rng: Rng,
     /// Round-robin cursor so every idle agent eventually gets a path request.
@@ -68,9 +77,14 @@ impl World {
         let mut rng = Rng::new(config.seed);
         let r = config.chunk_radius.max(0);
         let side = (2 * r + 1) as u64;
-        let mut positions = Vec::with_capacity(config.agent_count);
-        let mut velocities = Vec::with_capacity(config.agent_count);
-        for _ in 0..config.agent_count {
+        let behaviors = if config.behaviors.is_empty() {
+            vec![Behavior::default()]
+        } else {
+            config.behaviors.clone()
+        };
+        let mut ecs = hecs::World::new();
+        let mut ids = Vec::with_capacity(config.agent_count);
+        for i in 0..config.agent_count {
             let cx = (rng.next_u64() % side) as i32 - r;
             let cz = (rng.next_u64() % side) as i32 - r;
             let local = WorldPos::new(
@@ -78,25 +92,21 @@ impl World {
                 0.0,
                 rng.range_f32(0.0, CHUNK_SIZE),
             );
-            positions.push(WorldPos::from_chunk_local(ChunkCoord::new(cx, cz), local));
-            velocities.push(WorldPos::default());
+            let pos = WorldPos::from_chunk_local(ChunkCoord::new(cx, cz), local);
+            ids.push(ecs.spawn((
+                Position(pos),
+                Velocity::default(),
+                Path::default(),
+                BehaviorId(i % behaviors.len()),
+                Pause::default(),
+            )));
         }
-        let behaviors = if config.behaviors.is_empty() {
-            vec![Behavior::default()]
-        } else {
-            config.behaviors.clone()
-        };
-        let positions_len = positions.len();
-        let behavior_of = (0..positions_len).map(|i| i % behaviors.len()).collect();
         Self {
             seed: config.seed,
             tick: 0,
-            paths: vec![None; positions_len],
-            positions,
-            velocities,
+            ecs,
+            ids,
             behaviors,
-            behavior_of,
-            pause: vec![0; positions_len],
             max_path_requests_per_tick: config.max_path_requests_per_tick,
             rng,
             wander_cursor: 0,
@@ -104,28 +114,79 @@ impl World {
     }
 
     pub fn entity_count(&self) -> usize {
-        self.positions.len()
+        self.ids.len()
     }
 
     pub fn entities(&self) -> impl Iterator<Item = Entity> {
-        (0..self.positions.len() as u32).map(Entity)
+        (0..self.ids.len() as u32).map(Entity)
     }
 
     pub fn position(&self, e: Entity) -> WorldPos {
-        self.positions[e.0 as usize]
+        self.ecs
+            .get::<&Position>(self.ids[e.0 as usize])
+            .map(|p| p.0)
+            .unwrap_or_default()
+    }
+
+    pub fn set_position(&mut self, e: Entity, p: WorldPos) {
+        if let Ok(mut c) = self.ecs.get::<&mut Position>(self.ids[e.0 as usize]) {
+            c.0 = p;
+        }
+    }
+
+    /// All agent positions in spawn order (stable between ticks).
+    pub fn positions(&self) -> impl Iterator<Item = WorldPos> + '_ {
+        self.ecs
+            .query::<&Position>()
+            .iter()
+            .map(|(_, p)| p.0)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    pub fn is_navigating(&self, e: Entity) -> bool {
+        self.ecs
+            .get::<&Path>(self.ids[e.0 as usize])
+            .map(|p| p.0.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn behavior_of(&self, e: Entity) -> usize {
+        self.ecs
+            .get::<&BehaviorId>(self.ids[e.0 as usize])
+            .map(|b| b.0)
+            .unwrap_or(0)
+    }
+
+    pub fn pause_of(&self, e: Entity) -> u32 {
+        self.ecs
+            .get::<&Pause>(self.ids[e.0 as usize])
+            .map(|p| p.0)
+            .unwrap_or(0)
+    }
+
+    /// Number of agents currently following a path.
+    pub fn navigating_count(&self) -> usize {
+        self.ecs
+            .query::<&Path>()
+            .iter()
+            .filter(|(_, p)| p.0.is_some())
+            .count()
     }
 
     /// Plan a walkable route for `e` to the cell containing `goal`.
     /// Returns false (and leaves the entity unchanged) if no route is found.
     pub fn navigate_to(&mut self, e: Entity, goal: WorldPos) -> bool {
-        let i = e.0 as usize;
-        let p = self.positions[i];
+        let id = self.ids[e.0 as usize];
+        let p = self.position(e);
         let start = (p.x.floor() as i32, p.z.floor() as i32);
         let goal = (goal.x.floor() as i32, goal.z.floor() as i32);
         let seed = self.seed;
         match find_path(start, goal, PATH_BUDGET, |c| is_walkable(seed, c)) {
             Some(path) => {
-                self.paths[i] = Some(path.into_iter().skip(1).collect());
+                if let Ok(mut c) = self.ecs.get::<&mut Path>(id) {
+                    c.0 = Some(path.into_iter().skip(1).collect());
+                }
                 true
             }
             None => false,
@@ -136,17 +197,12 @@ impl World {
     pub fn step(&mut self) {
         self.assign_wander_goals();
         self.follow_paths();
-        for (p, v) in self.positions.iter_mut().zip(&self.velocities) {
-            p.x += v.x * TICK_DT;
-            p.y += v.y * TICK_DT;
-            p.z += v.z * TICK_DT;
-        }
         self.tick += 1;
     }
 
     /// Serve a bounded number of path requests for idle agents, round-robin.
     fn assign_wander_goals(&mut self) {
-        let n = self.paths.len();
+        let n = self.ids.len();
         let mut requests = 0;
         for _ in 0..n {
             if requests >= self.max_path_requests_per_tick {
@@ -154,59 +210,62 @@ impl World {
             }
             let i = self.wander_cursor;
             self.wander_cursor = (self.wander_cursor + 1) % n;
-            let r = self.behaviors[self.behavior_of[i]].wander_range;
-            if self.paths[i].is_some() || self.pause[i] > 0 || r == 0 {
+            let e = Entity(i as u32);
+            let r = self.behaviors[self.behavior_of(e)].wander_range;
+            if self.is_navigating(e) || self.pause_of(e) > 0 || r == 0 {
                 continue;
             }
             requests += 1;
             let span = 2 * r as u64 + 1;
             let dx = (self.rng.next_u64() % span) as i32 - r;
             let dz = (self.rng.next_u64() % span) as i32 - r;
-            let p = self.positions[i];
-            self.navigate_to(
-                Entity(i as u32),
-                WorldPos::new(p.x + dx as f32, 0.0, p.z + dz as f32),
-            );
+            let p = self.position(e);
+            self.navigate_to(e, WorldPos::new(p.x + dx as f32, 0.0, p.z + dz as f32));
         }
     }
 
     fn follow_paths(&mut self) {
-        for i in 0..self.paths.len() {
-            self.pause[i] = self.pause[i].saturating_sub(1);
-            let speed = self.behaviors[self.behavior_of[i]].speed;
-            let step_len = speed * TICK_DT;
-            let Some(path) = self.paths[i].as_mut() else {
+        let seed = self.seed;
+        let behaviors = &self.behaviors;
+        let rng = &mut self.rng;
+        for (_, (pos, vel, path, bid, pause)) in self.ecs.query_mut::<(
+            &mut Position,
+            &mut Velocity,
+            &mut Path,
+            &BehaviorId,
+            &mut Pause,
+        )>() {
+            pause.0 = pause.0.saturating_sub(1);
+            let b = &behaviors[bid.0];
+            let step_len = b.speed * TICK_DT;
+            let Some(wp) = path.0.as_mut() else {
                 continue;
             };
-            let Some(&(cx, cz)) = path.front() else {
-                self.paths[i] = None;
-                self.velocities[i] = WorldPos::default();
-                self.start_pause(i);
+            let Some(&(cx, cz)) = wp.front() else {
+                path.0 = None;
+                vel.0 = WorldPos::default();
+                let (min, max) = (b.pause_ticks_min, b.pause_ticks_max);
+                let extra = if max > min {
+                    (rng.next_u64() % (max - min + 1) as u64) as u32
+                } else {
+                    0
+                };
+                pause.0 = min + extra;
                 continue;
             };
             let (tx, tz) = (cx as f32 + 0.5, cz as f32 + 0.5);
-            let p = self.positions[i];
-            let (dx, dz) = (tx - p.x, tz - p.z);
+            let (dx, dz) = (tx - pos.0.x, tz - pos.0.z);
             let dist = (dx * dx + dz * dz).sqrt();
             if dist <= step_len {
-                self.positions[i] = WorldPos::new(tx, height_at(self.seed, tx, tz), tz);
-                self.velocities[i] = WorldPos::default();
-                path.pop_front();
+                pos.0 = WorldPos::new(tx, height_at(seed, tx, tz), tz);
+                vel.0 = WorldPos::default();
+                wp.pop_front();
             } else {
-                self.velocities[i] = WorldPos::new(dx / dist * speed, 0.0, dz / dist * speed);
+                vel.0 = WorldPos::new(dx / dist * b.speed, 0.0, dz / dist * b.speed);
+                pos.0.x += vel.0.x * TICK_DT;
+                pos.0.z += vel.0.z * TICK_DT;
             }
         }
-    }
-
-    fn start_pause(&mut self, i: usize) {
-        let b = &self.behaviors[self.behavior_of[i]];
-        let (min, max) = (b.pause_ticks_min, b.pause_ticks_max);
-        let extra = if max > min {
-            (self.rng.next_u64() % (max - min + 1) as u64) as u32
-        } else {
-            0
-        };
-        self.pause[i] = min + extra;
     }
 
     pub fn run_ticks(&mut self, n: u64) {
@@ -228,10 +287,20 @@ mod tests {
         }
     }
 
+    fn snapshot(w: &World) -> Vec<WorldPos> {
+        w.positions().collect()
+    }
+
     #[test]
     fn same_seed_is_deterministic() {
-        assert_eq!(World::generate(&cfg(42)), World::generate(&cfg(42)));
-        assert_ne!(World::generate(&cfg(42)), World::generate(&cfg(43)));
+        assert_eq!(
+            snapshot(&World::generate(&cfg(42))),
+            snapshot(&World::generate(&cfg(42)))
+        );
+        assert_ne!(
+            snapshot(&World::generate(&cfg(42))),
+            snapshot(&World::generate(&cfg(43)))
+        );
     }
 
     #[test]
@@ -246,25 +315,29 @@ mod tests {
     }
 
     #[test]
+    fn spawn_order_matches_entity_index() {
+        let w = World::generate(&cfg(3));
+        let by_index: Vec<_> = w.entities().map(|e| w.position(e)).collect();
+        assert_eq!(by_index, snapshot(&w));
+    }
+
+    #[test]
     fn movement_over_fixed_ticks() {
-        let mut w = World {
+        let mut w = World::generate(&WorldConfig {
             seed: 0,
-            tick: 0,
-            positions: vec![WorldPos::new(0.0, 0.0, 0.0)],
-            velocities: vec![WorldPos::new(3.0, 0.0, -6.0)],
-            paths: vec![None],
-            behaviors: vec![Behavior::default()],
-            behavior_of: vec![0],
-            pause: vec![0],
-            max_path_requests_per_tick: 0,
-            rng: Rng::new(0),
-            wander_cursor: 0,
-        };
-        w.run_ticks(TICKS_PER_SECOND as u64);
-        assert_eq!(w.tick, TICKS_PER_SECOND as u64);
-        let p = w.positions[0];
-        assert!((p.x - 3.0).abs() < 1e-3);
-        assert!((p.z + 6.0).abs() < 1e-3);
+            agent_count: 1,
+            behaviors: vec![Behavior::from_seconds(0, 0.0, 0.0, 3.0)],
+            ..Default::default()
+        });
+        let e = Entity(0);
+        w.set_position(e, WorldPos::new(0.0, 0.0, 0.0));
+        // Give the agent a straight run of 30 cells along +x; at 3 m/s it needs 10 s.
+        let id = w.ids[0];
+        w.ecs.get::<&mut Path>(id).unwrap().0 = Some((0..30).map(|x| (x, 0)).collect());
+        w.run_ticks(TICKS_PER_SECOND as u64 * 4);
+        let p = w.position(e);
+        assert!(p.x > 8.0 && p.x < 14.0, "x = {}", p.x);
+        assert!((p.z - 0.5).abs() < 1.0);
     }
 
     #[test]
@@ -276,7 +349,6 @@ mod tests {
             ..Default::default()
         });
         let seed = w.seed;
-        // Place the agent on a walkable cell with a walkable goal nearby.
         let start = (0..200)
             .map(|i| (i, i / 2))
             .find(|&c| is_walkable(seed, c))
@@ -285,15 +357,17 @@ mod tests {
             .map(|i| (start.0 + 10 + i % 5, start.1 + i / 5))
             .find(|&c| is_walkable(seed, c))
             .unwrap();
-        w.positions[0] = WorldPos::new(start.0 as f32 + 0.5, 0.0, start.1 as f32 + 0.5);
+        let e = Entity(0);
+        w.set_position(
+            e,
+            WorldPos::new(start.0 as f32 + 0.5, 0.0, start.1 as f32 + 0.5),
+        );
         let goal_pos = WorldPos::new(goal.0 as f32 + 0.5, 0.0, goal.1 as f32 + 0.5);
-        assert!(w.navigate_to(Entity(0), goal_pos));
-        {
-            w.run_ticks(TICKS_PER_SECOND as u64 * 120);
-            let p = w.positions[0];
-            assert!((p.x - goal_pos.x).abs() < 1e-3 && (p.z - goal_pos.z).abs() < 1e-3);
-            assert!(w.paths[0].is_none());
-        }
+        assert!(w.navigate_to(e, goal_pos));
+        w.run_ticks(TICKS_PER_SECOND as u64 * 120);
+        let p = w.position(e);
+        assert!((p.x - goal_pos.x).abs() < 1e-3 && (p.z - goal_pos.z).abs() < 1e-3);
+        assert!(!w.is_navigating(e));
     }
 
     #[test]
@@ -305,15 +379,12 @@ mod tests {
             ..Default::default()
         });
         let seed = w.seed;
-        let bad = (0..500)
+        let c = (0..500)
             .map(|i| (i, 3 * i))
-            .find(|&c| !is_walkable(seed, c));
-        let c = bad.expect("unwalkable cell exists");
-        {
-            let before = w.paths[0].clone();
-            assert!(!w.navigate_to(Entity(0), WorldPos::new(c.0 as f32, 0.0, c.1 as f32)));
-            assert_eq!(w.paths[0], before);
-        }
+            .find(|&c| !is_walkable(seed, c))
+            .expect("unwalkable cell exists");
+        assert!(!w.navigate_to(Entity(0), WorldPos::new(c.0 as f32, 0.0, c.1 as f32)));
+        assert!(!w.is_navigating(Entity(0)));
     }
 
     #[test]
@@ -324,11 +395,11 @@ mod tests {
             ..Default::default()
         };
         let (mut a, mut b) = (World::generate(&c), World::generate(&c));
-        let start = a.positions.clone();
+        let start = snapshot(&a);
         a.run_ticks(300);
         b.run_ticks(300);
-        assert_eq!(a, b);
-        assert_ne!(a.positions, start);
+        assert_eq!(snapshot(&a), snapshot(&b));
+        assert_ne!(snapshot(&a), start);
     }
 
     #[test]
@@ -341,7 +412,7 @@ mod tests {
         };
         let mut w = World::generate(&c);
         w.step();
-        assert!(w.paths.iter().filter(|p| p.is_some()).count() <= 3);
+        assert!(w.navigating_count() <= 3);
     }
 
     #[test]
@@ -353,9 +424,9 @@ mod tests {
             ..Default::default()
         };
         let mut w = World::generate(&c);
-        let start = w.positions.clone();
+        let start = snapshot(&w);
         w.run_ticks(200);
-        assert_eq!(w.positions, start);
+        assert_eq!(snapshot(&w), start);
     }
 
     #[test]
@@ -370,11 +441,13 @@ mod tests {
             ..Default::default()
         };
         let mut w = World::generate(&c);
-        assert_eq!(w.behavior_of, vec![0, 1, 0, 1]);
+        let b: Vec<_> = w.entities().map(|e| w.behavior_of(e)).collect();
+        assert_eq!(b, vec![0, 1, 0, 1]);
         // Entity 1 finishes a walk, then must pause for the configured 100 s.
-        w.paths[1] = Some(VecDeque::new());
+        let id = w.ids[1];
+        w.ecs.get::<&mut Path>(id).unwrap().0 = Some(VecDeque::new());
         w.step();
-        assert!(w.pause[1] >= 100 * TICKS_PER_SECOND - 1);
-        assert!(w.paths[1].is_none());
+        assert!(w.pause_of(Entity(1)) >= 100 * TICKS_PER_SECOND - 1);
+        assert!(!w.is_navigating(Entity(1)));
     }
 }

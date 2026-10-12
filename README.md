@@ -16,7 +16,7 @@ Workspace, window + fixed-timestep loop, camera stub, placeholder renderer (top-
 
 ## Run
 ```sh
-cargo run -p game_client --release   # WASD pan, wheel zoom, Esc quit
+cargo run -p game_client --release   # wgpu 3D: WASD pan, wheel zoom, right/middle-drag orbit, Q/E rotate, Esc quit
 ```
 Frame time, sim ticks/sec and entity count print to stdout once per second. Requires a desktop display.
 
@@ -36,4 +36,6 @@ Gameplay values live in `assets/content/*.json`, not the engine: `factions`, `un
 
 `buildings.json` and `crops.json` define placeable buildings (footprint, required resource, dwelling, cost, crop) and crops (growth days, yield); `core_sim::Buildings` validates placement (slope, overlap, protected city zones, resource requirement) and crop growth is computed from the clock on demand.
 
-Planned next: ECS migration (hecs), levels/skills, static map + cities, LOD scheduling, wgpu renderer.
+Simulation runs on `hecs`, maths on `glam`, rendering on `wgpu` (lit, fogged, chunked terrain meshes + instanced agents).
+
+Planned next: levels/skills, static map + cities, LOD scheduling, shadows, glTF models.

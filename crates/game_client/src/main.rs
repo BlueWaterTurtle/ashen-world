@@ -1,19 +1,30 @@
 mod camera;
-mod shade;
+mod mesh;
+mod renderer;
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use camera::Camera;
-use core_sim::{Behavior, ChunkStreamer, World, WorldConfig, WorldPos, CHUNK_SIZE, TICK_DT};
-use std::num::NonZeroU32;
-use std::rc::Rc;
-use std::time::{Duration, Instant};
+use core_sim::{height_at, Behavior, Entity, World, WorldConfig, TICK_DT};
+use renderer::{AgentInstance, Renderer};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 /// Cap on frame time fed to the accumulator to avoid a spiral of death.
 const MAX_FRAME: Duration = Duration::from_millis(250);
+/// Terrain is meshed within this many chunks of the camera target.
+const VIEW_RADIUS_CHUNKS: i32 = 7;
+/// Agent tints, cycled by behaviour index.
+const PALETTE: [[f32; 4]; 4] = [
+    [0.95, 0.76, 0.30, 1.0],
+    [0.80, 0.30, 0.25, 1.0],
+    [0.35, 0.65, 0.85, 1.0],
+    [0.55, 0.80, 0.45, 1.0],
+];
 
 #[derive(Default)]
 struct Input {
@@ -21,8 +32,8 @@ struct Input {
     right: bool,
     forward: bool,
     back: bool,
-    up: bool,
-    down: bool,
+    orbiting: bool,
+    last_cursor: Option<(f64, f64)>,
 }
 
 struct Stats {
@@ -33,25 +44,20 @@ struct Stats {
 
 struct App {
     world: World,
-    terrain: ChunkStreamer,
-    /// Zoom multiplier on the base pixels-per-meter scale (mouse wheel).
-    zoom: f32,
     camera: Camera,
     input: Input,
     accumulator: f32,
     last: Instant,
     stats: Stats,
-    window: Option<Rc<Window>>,
-    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
+    window: Option<Arc<Window>>,
+    renderer: Option<Renderer>,
 }
 
 impl App {
     fn new(world: World) -> Self {
         let now = Instant::now();
         Self {
-            terrain: ChunkStreamer::new(world.seed, 3),
             world,
-            zoom: 1.0,
             camera: Camera::default(),
             input: Input::default(),
             accumulator: 0.0,
@@ -62,7 +68,7 @@ impl App {
                 ticks: 0,
             },
             window: None,
-            surface: None,
+            renderer: None,
         }
     }
 
@@ -76,83 +82,65 @@ impl App {
             self.accumulator -= TICK_DT;
             self.stats.ticks += 1;
         }
-        let i = &self.input;
+
         let axis = |pos: bool, neg: bool| f32::from(pos) - f32::from(neg);
-        let speed = 60.0 * dt.as_secs_f32();
+        let speed = self.camera.distance * 0.9 * dt.as_secs_f32();
         self.camera.pan(
-            axis(i.right, i.left) * speed,
-            axis(i.forward, i.back) * speed,
-            axis(i.up, i.down) * speed,
+            axis(self.input.right, self.input.left) * speed,
+            axis(self.input.forward, self.input.back) * speed,
         );
-        let cam = WorldPos::new(self.camera.position[0], 0.0, self.camera.position[2]);
-        self.terrain.update(cam.chunk());
-        self.render();
+        let seed = self.world.seed;
+        self.camera.target.y = height_at(seed, self.camera.target.x, self.camera.target.z);
+
+        if let Some(r) = &mut self.renderer {
+            self.camera.aspect = r.aspect();
+            let t = self.camera.target;
+            let center = core_sim::WorldPos::new(t.x, 0.0, t.z).chunk();
+            r.update_chunks(center, VIEW_RADIUS_CHUNKS);
+            let agents: Vec<AgentInstance> = self
+                .world
+                .entities()
+                .map(|e: Entity| {
+                    let p = self.world.position(e);
+                    let c = PALETTE[self.world.behavior_of(e) % PALETTE.len()];
+                    AgentInstance {
+                        pos: [p.x, height_at(seed, p.x, p.z), p.z, 0.0],
+                        color: c,
+                    }
+                })
+                .collect();
+            match r.render(&self.camera, &agents) {
+                Ok(()) => {}
+                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                    if let Some(w) = &self.window {
+                        let s = w.inner_size();
+                        r.resize(s.width, s.height);
+                    }
+                }
+                Err(wgpu::SurfaceError::OutOfMemory) => std::process::exit(1),
+                Err(e) => eprintln!("render error: {e}"),
+            }
+        }
+
         self.stats.frames += 1;
         let elapsed = now - self.stats.window_start;
         if elapsed >= Duration::from_secs(1) {
             let secs = elapsed.as_secs_f32();
-            println!(
-                "frame {:.2} ms | sim {:.1} ticks/s | entities {}",
+            let line = format!(
+                "frame {:.2} ms | sim {:.1} ticks/s | entities {} | chunks {}",
                 1000.0 * secs / self.stats.frames as f32,
                 self.stats.ticks as f32 / secs,
-                self.world.entity_count()
+                self.world.entity_count(),
+                self.renderer.as_ref().map_or(0, Renderer::loaded_chunks),
             );
+            println!("{line}");
+            if let Some(w) = &self.window {
+                w.set_title(&format!("Ashen World - {line}"));
+            }
             self.stats.window_start = now;
             self.stats.frames = 0;
             self.stats.ticks = 0;
         }
-    }
-
-    /// Placeholder renderer: top-down dots for each entity relative to the camera.
-    fn render(&mut self) {
-        let (Some(window), Some(surface)) = (&self.window, &mut self.surface) else {
-            return;
-        };
-        let size = window.inner_size();
-        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
-            return;
-        };
-        if surface.resize(w, h).is_err() {
-            return;
-        }
-        let Ok(mut buf) = surface.buffer_mut() else {
-            return;
-        };
-        let seed = self.world.seed;
-        self.camera.aspect = size.width as f32 / size.height as f32;
-        let px_per_unit = size.height as f32 / (CHUNK_SIZE * 4.0) * self.zoom;
-        let (cx, cz) = (self.camera.position[0], self.camera.position[2]);
-        // Sample terrain once per BLOCK x BLOCK pixel block to keep the CPU cost low.
-        const BLOCK: usize = 4;
-        let (width, height) = (size.width as usize, size.height as usize);
-        for by in (0..height).step_by(BLOCK) {
-            for bx in (0..width).step_by(BLOCK) {
-                let wx = ((bx + BLOCK / 2) as f32 - width as f32 / 2.0) / px_per_unit + cx;
-                let wz = ((by + BLOCK / 2) as f32 - height as f32 / 2.0) / px_per_unit + cz;
-                let color = shade::terrain_color(seed, wx, wz);
-                for py in by..(by + BLOCK).min(height) {
-                    buf[py * width + bx..py * width + (bx + BLOCK).min(width)].fill(color);
-                }
-            }
-        }
-        // Agents: a dark-outlined square that grows with zoom so they stay visible.
-        let half = ((px_per_unit * 0.6).round() as i32).clamp(1, 6);
-        for p in &self.world.positions {
-            let sx = ((p.x - cx) * px_per_unit + width as f32 / 2.0) as i32;
-            let sy = ((p.z - cz) * px_per_unit + height as f32 / 2.0) as i32;
-            for dy in -half - 1..=half + 1 {
-                for dx in -half - 1..=half + 1 {
-                    let (x, y) = (sx + dx, sy + dy);
-                    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
-                        continue;
-                    }
-                    let edge = dx.abs() > half || dy.abs() > half;
-                    buf[y as usize * width + x as usize] =
-                        if edge { 0x0010_0c0a } else { 0x00f2_c14e };
-                }
-            }
-        }
-        let _ = buf.present();
     }
 }
 
@@ -163,46 +151,69 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes().with_title("Ashen World");
         let window = match event_loop.create_window(attrs) {
-            Ok(w) => Rc::new(w),
+            Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("failed to create window: {e}");
                 event_loop.exit();
                 return;
             }
         };
-        match softbuffer::Context::new(window.clone())
-            .and_then(|ctx| softbuffer::Surface::new(&ctx, window.clone()))
-        {
-            Ok(s) => self.surface = Some(s),
-            Err(e) => eprintln!("failed to create surface: {e}"),
+        match Renderer::new(window.clone(), self.world.seed) {
+            Ok(r) => self.renderer = Some(r),
+            Err(e) => {
+                eprintln!("failed to initialise GPU renderer: {e}");
+                event_loop.exit();
+                return;
+            }
         }
+        window.request_redraw();
         self.window = Some(window);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(s) => {
+                if let Some(r) = &mut self.renderer {
+                    r.resize(s.width, s.height);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let down = event.state == ElementState::Pressed;
                 if let PhysicalKey::Code(code) = event.physical_key {
                     match code {
                         KeyCode::Escape => event_loop.exit(),
-                        KeyCode::KeyA => self.input.left = down,
-                        KeyCode::KeyD => self.input.right = down,
-                        KeyCode::KeyW => self.input.forward = down,
-                        KeyCode::KeyS => self.input.back = down,
-                        KeyCode::KeyE => self.input.up = down,
-                        KeyCode::KeyQ => self.input.down = down,
+                        KeyCode::KeyA | KeyCode::ArrowLeft => self.input.left = down,
+                        KeyCode::KeyD | KeyCode::ArrowRight => self.input.right = down,
+                        KeyCode::KeyW | KeyCode::ArrowUp => self.input.forward = down,
+                        KeyCode::KeyS | KeyCode::ArrowDown => self.input.back = down,
+                        KeyCode::KeyQ if down => self.camera.orbit(-0.2, 0.0),
+                        KeyCode::KeyE if down => self.camera.orbit(0.2, 0.0),
                         _ => {}
                     }
                 }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button == MouseButton::Right || button == MouseButton::Middle {
+                    self.input.orbiting = state == ElementState::Pressed;
+                    self.input.last_cursor = None;
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if self.input.orbiting {
+                    if let Some((lx, ly)) = self.input.last_cursor {
+                        let (dx, dy) = (position.x - lx, position.y - ly);
+                        self.camera.orbit(-dx as f32 * 0.005, dy as f32 * 0.005);
+                    }
+                }
+                self.input.last_cursor = Some((position.x, position.y));
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let steps = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                 };
-                self.zoom = (self.zoom * 1.15f32.powf(steps)).clamp(0.25, 8.0);
+                self.camera.zoom(steps);
             }
             WindowEvent::RedrawRequested => {
                 self.frame();
@@ -240,21 +251,27 @@ fn behaviors_from_content(c: &content::Content) -> Vec<Behavior> {
 
 fn main() {
     let content_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/content");
-    match content::load_content(&content_dir) {
-        Ok(c) => println!(
-            "content: {} factions, {} units, {} biomes",
-            c.factions.len(),
-            c.units.len(),
-            c.biomes.len()
-        ),
-        Err(e) => eprintln!("content load failed: {e}"),
-    }
     let config = match content::load_content(&content_dir) {
-        Ok(c) => WorldConfig {
-            behaviors: behaviors_from_content(&c),
-            ..WorldConfig::default()
-        },
-        Err(_) => WorldConfig::default(),
+        Ok(c) => {
+            println!(
+                "content: {} factions, {} units, {} biomes, {} races, {} behaviors, {} buildings, {} crops",
+                c.factions.len(),
+                c.units.len(),
+                c.biomes.len(),
+                c.races.len(),
+                c.behaviors.len(),
+                c.buildings.len(),
+                c.crops.len()
+            );
+            WorldConfig {
+                behaviors: behaviors_from_content(&c),
+                ..WorldConfig::default()
+            }
+        }
+        Err(e) => {
+            eprintln!("content load failed: {e}");
+            WorldConfig::default()
+        }
     };
     let world = World::generate(&config);
     let event_loop = match EventLoop::new() {

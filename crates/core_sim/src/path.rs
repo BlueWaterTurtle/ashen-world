@@ -62,7 +62,7 @@ pub fn find_path(
                     continue;
                 }
                 let nc = cost + if diag { 14 } else { 10 };
-                if g.get(&n).map_or(true, |&old| nc < old) {
+                if g.get(&n).is_none_or(|&old| nc < old) {
                     g.insert(n, nc);
                     came.insert(n, cur);
                     open.push(Reverse((nc + h(n), nc, n)));
