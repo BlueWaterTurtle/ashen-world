@@ -6,6 +6,8 @@ pub mod chunk;
 pub mod clock;
 pub mod npc;
 pub mod path;
+pub mod production;
+pub mod resource;
 pub mod rng;
 pub mod terrain;
 pub mod world;
@@ -22,6 +24,8 @@ pub use npc::{
     SimTier, SimulationTier, Skills,
 };
 pub use path::{find_path, Cell, Pathfinder};
+pub use production::{MineProduction, OutputSlot, ORE_SECONDS_PER_UNIT};
+pub use resource::{ResourceDef, ResourceKind, DEFAULT_STACK_SIZE, ORE_STACK_SIZE};
 pub use rng::Rng;
 pub use terrain::{
     fertility_at, height_at, is_walkable, resource_richness_at, ChunkStreamer, ChunkTerrain,

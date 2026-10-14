@@ -1,6 +1,7 @@
 use crate::chunk::WorldPos;
 use crate::clock::GameClock;
 use crate::npc::{Inventory, ItemStack};
+use crate::production::MineProduction;
 use crate::terrain::{fertility_at, height_at, resource_richness_at, MAX_STEP_HEIGHT};
 use crate::world::Entity;
 
@@ -44,6 +45,8 @@ pub struct Building {
     pub inputs: SlotInventory,
     pub outputs: SlotInventory,
     pub is_storage: bool,
+    /// Ore production state, present for mines.
+    pub mine: Option<MineProduction>,
 }
 
 /// Finite storage where each slot holds one resource type up to `stack_limit`.
@@ -160,6 +163,7 @@ pub struct BuildingLogistics {
     pub input_resources: Vec<String>,
     pub output_resources: Vec<String>,
     pub is_storage: bool,
+    pub is_mine: bool,
 }
 
 impl Default for BuildingLogistics {
@@ -172,6 +176,7 @@ impl Default for BuildingLogistics {
             input_resources: Vec::new(),
             output_resources: Vec::new(),
             is_storage: false,
+            is_mine: false,
         }
     }
 }
@@ -303,6 +308,7 @@ impl Buildings {
                 logistics.output_resources.clone(),
             ),
             is_storage: logistics.is_storage,
+            mine: logistics.is_mine.then(MineProduction::default),
         });
         Ok(self.buildings.len() - 1)
     }
@@ -528,6 +534,17 @@ impl Buildings {
         Ok(building.outputs.insert(item, count))
     }
 
+    /// Advance mine production by `dt` seconds. A mine is worked while any assigned
+    /// worker satisfies `is_working`.
+    pub fn tick_production(&mut self, dt: f32, is_working: impl Fn(Entity) -> bool) {
+        for building in &mut self.buildings {
+            let worked = building.workers.iter().flatten().any(|w| is_working(*w));
+            if let Some(mine) = &mut building.mine {
+                mine.advance(dt, worked);
+            }
+        }
+    }
+
     /// True if a cell is blocked by a building (for pathfinding obstacles).
     pub fn blocks(&self, cell: (i32, i32)) -> bool {
         self.buildings.iter().any(|b| b.footprint.contains(cell))
@@ -679,6 +696,7 @@ mod tests {
                     input_resources: vec!["wheat_seed".into()],
                     output_resources: vec!["wheat".into()],
                     is_storage: false,
+                    is_mine: false,
                 },
             )
             .unwrap();
@@ -696,6 +714,7 @@ mod tests {
                     input_resources: vec!["wheat".into()],
                     output_resources: vec!["wheat".into()],
                     is_storage: true,
+                    is_mine: false,
                 },
             )
             .unwrap();
@@ -766,5 +785,60 @@ mod tests {
         assert_eq!(crop_progress(&clock, 0, 0, 3.0), 0.0);
         assert!((crop_progress(&clock, 0, day * 3 / 2, 3.0) - 0.5).abs() < 1e-5);
         assert_eq!(crop_progress(&clock, 0, day * 10, 3.0), 1.0);
+    }
+
+    #[test]
+    fn mine_produces_only_while_worker_working() {
+        let mut buildings = Buildings::default();
+        let mine = buildings
+            .place_with_logistics(
+                1,
+                "iron_mine",
+                Footprint {
+                    x: 0,
+                    z: 0,
+                    width: 1,
+                    depth: 1,
+                },
+                &PlacementRules::default(),
+                BuildingLogistics {
+                    worker_slots: 1,
+                    is_mine: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let worker = Entity(1);
+        buildings.tick_production(2.0, |_| true);
+        assert_eq!(
+            buildings.buildings[mine]
+                .mine
+                .as_ref()
+                .unwrap()
+                .output
+                .count,
+            0
+        );
+        buildings.assign_worker(mine, worker).unwrap();
+        buildings.tick_production(2.0, |_| false);
+        assert_eq!(
+            buildings.buildings[mine]
+                .mine
+                .as_ref()
+                .unwrap()
+                .output
+                .count,
+            0
+        );
+        buildings.tick_production(2.0, |w| w == worker);
+        assert_eq!(
+            buildings.buildings[mine]
+                .mine
+                .as_ref()
+                .unwrap()
+                .output
+                .count,
+            1
+        );
     }
 }

@@ -201,6 +201,7 @@ impl App {
                 input_resources: definition.input_resources.clone(),
                 output_resources: definition.output_resources.clone(),
                 is_storage: definition.storage,
+                is_mine: definition.mine,
             };
             match self.buildings.place_with_logistics(
                 self.world.seed,

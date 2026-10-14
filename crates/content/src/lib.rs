@@ -105,6 +105,9 @@ pub struct BuildingDef {
     /// Whether this building accepts output transfers from other buildings.
     #[serde(default)]
     pub storage: bool,
+    /// Whether this building mines ore into its output slot while worked.
+    #[serde(default)]
+    pub mine: bool,
     /// Whether residents can live here.
     #[serde(default)]
     pub dwelling: bool,
