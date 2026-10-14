@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 core_sim = { path = "../core_sim" }
 content = { path = "../content" }
+asset_pipeline = { path = "../asset_pipeline" }
 winit = "0.30"
 wgpu = "22.1"
 glam = "0.29"
@@ -15,3 +16,6 @@ pollster = "0.3"
 egui = "0.29"
 egui-wgpu = "0.29"
 egui-winit = "0.29"
+
+[dev-dependencies]
+naga = { version = "22", features = ["wgsl-in"] }

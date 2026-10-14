@@ -1,3 +1,4 @@
+mod assets;
 mod camera;
 mod mesh;
 mod renderer;
@@ -24,13 +25,6 @@ use winit::window::{Window, WindowId};
 const MAX_FRAME: Duration = Duration::from_millis(250);
 /// Terrain is meshed within this many chunks of the camera target.
 const VIEW_RADIUS_CHUNKS: i32 = 7;
-/// Agent tints, cycled by behaviour index.
-const PALETTE: [[f32; 4]; 4] = [
-    [0.95, 0.76, 0.30, 1.0],
-    [0.80, 0.30, 0.25, 1.0],
-    [0.35, 0.65, 0.85, 1.0],
-    [0.55, 0.80, 0.45, 1.0],
-];
 const AGENT_CULL_RADIUS: f32 = 1.0;
 
 fn agent_in_frustum(position: WorldPos, view_proj: Mat4) -> bool {
@@ -363,10 +357,8 @@ impl App {
                         [0.2, 0.95, 0.35, 1.0]
                     } else if self.selected_entities.contains(&e) {
                         [0.9, 0.82, 0.35, 1.0]
-                    } else if self.world.is_player_controlled(e) {
-                        [0.15, 0.70, 0.30, 1.0]
                     } else {
-                        PALETTE[self.world.behavior_of(e) % PALETTE.len()]
+                        [1.0; 4]
                     };
                     self.agent_instances.push(AgentInstance {
                         pos: [position.x, position.y, position.z, 0.0],
@@ -695,7 +687,7 @@ fn behaviors_from_content(c: &content::Content) -> Vec<Behavior> {
 }
 
 fn main() {
-    let content_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/content");
+    let content_dir = assets::root().join("content");
     let (config, building_defs) = match content::load_content(&content_dir) {
         Ok(c) => {
             println!(
@@ -842,5 +834,16 @@ mod tests {
         assert!(rendered_entities.contains(&e_reduced));
         assert!(!rendered_entities.contains(&e_dormant));
         assert!(!rendered_entities.contains(&e_culled));
+    }
+
+    #[test]
+    fn textured_render_shader_validates() {
+        let module = naga::front::wgsl::parse_str(include_str!("shader.wgsl")).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
     }
 }

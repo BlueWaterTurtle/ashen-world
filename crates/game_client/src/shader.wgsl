@@ -6,19 +6,23 @@ struct Globals {
 };
 @group(0) @binding(0) var<uniform> g: Globals;
 
+struct Material {
+    base_color: vec4<f32>,
+};
+@group(1) @binding(0) var base_color_texture: texture_2d<f32>;
+@group(1) @binding(1) var base_color_sampler: sampler;
+@group(1) @binding(2) var<uniform> material: Material;
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) tint: vec3<f32>,
+    @location(3) uv: vec2<f32>,
 };
 
 fn srgb(c: vec3<f32>) -> vec3<f32> {
     return pow(c, vec3<f32>(2.2));
-}
-
-fn hash2(p: vec2<f32>) -> f32 {
-    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
 
 fn light(base: vec3<f32>, n_in: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
@@ -41,22 +45,34 @@ fn vs_terrain(@location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>) -> Vs
     o.world = pos;
     o.normal = normal;
     o.tint = vec3<f32>(1.0);
+    o.uv = vec2<f32>(0.0);
     return o;
 }
 
 @fragment
 fn fs_terrain(i: VsOut) -> @location(0) vec4<f32> {
     let t = clamp(i.world.y / 40.0, 0.0, 1.0);
-    let ash = srgb(vec3<f32>(0.23, 0.21, 0.20));
-    let dust = srgb(vec3<f32>(0.47, 0.38, 0.27));
-    let rock = srgb(vec3<f32>(0.62, 0.60, 0.57));
-    var base = mix(ash, dust, clamp(t * 2.0, 0.0, 1.0));
-    base = mix(base, rock, clamp(t * 2.0 - 1.0, 0.0, 1.0));
+    let macro_noise = textureSample(
+        base_color_texture,
+        base_color_sampler,
+        i.world.xz * 0.008,
+    ).r;
+    let fine_noise = textureSample(
+        base_color_texture,
+        base_color_sampler,
+        i.world.xz * 0.18,
+    ).r;
+    let ash = srgb(vec3<f32>(0.27, 0.24, 0.21));
+    let dust = srgb(vec3<f32>(0.48, 0.38, 0.27));
+    let rock = srgb(vec3<f32>(0.56, 0.53, 0.48));
+    let dust_patch = smoothstep(0.24, 0.76, macro_noise);
+    var base = mix(ash, dust, 0.55 + dust_patch * 0.40);
+    base = mix(base, rock, smoothstep(0.30, 0.85, t));
     let n = normalize(i.normal);
     let steep = clamp((1.0 - n.y) * 6.0, 0.0, 1.0);
     base = mix(base, srgb(vec3<f32>(0.40, 0.38, 0.36)), steep * 0.6);
-    let grain = (hash2(floor(i.world.xz * 2.0)) - 0.5) * 0.18;
-    base = base * (1.0 + grain);
+    let fine_grain = 0.94 + fine_noise * 0.12;
+    base = base * fine_grain;
     return vec4<f32>(light(base, n, i.world), 1.0);
 }
 
@@ -64,8 +80,9 @@ fn fs_terrain(i: VsOut) -> @location(0) vec4<f32> {
 fn vs_agent(
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) inst_pos: vec4<f32>,
-    @location(3) inst_color: vec4<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) inst_pos: vec4<f32>,
+    @location(4) inst_color: vec4<f32>,
 ) -> VsOut {
     var o: VsOut;
     let world = pos + inst_pos.xyz;
@@ -73,10 +90,13 @@ fn vs_agent(
     o.world = world;
     o.normal = normal;
     o.tint = inst_color.rgb;
+    o.uv = uv;
     return o;
 }
 
 @fragment
 fn fs_agent(i: VsOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(light(srgb(i.tint), i.normal, i.world), 1.0);
+    let texel = textureSample(base_color_texture, base_color_sampler, i.uv);
+    let base = texel.rgb * material.base_color.rgb * srgb(i.tint);
+    return vec4<f32>(light(base, i.normal, i.world), texel.a * material.base_color.a);
 }

@@ -1,11 +1,13 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use core_sim::{Building, ChunkCoord};
+use core_sim::{Building, ChunkCoord, Footprint};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+use crate::assets;
 use crate::camera::Camera;
 use crate::mesh::{building_mesh, humanoid_mesh, terrain_chunk_mesh, Vertex};
 use crate::ui::GameUi;
@@ -39,10 +41,29 @@ pub struct AgentInstance {
 
 pub type BuildingInstance = AgentInstance;
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct MaterialUniform {
+    base_color: [f32; 4],
+}
+
+struct GpuMaterial {
+    _texture: wgpu::Texture,
+    _uniform: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
 struct GpuMesh {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     index_count: u32,
+}
+
+struct GpuBuilding {
+    mesh: GpuMesh,
+    surfaces: Vec<asset_pipeline::Surface>,
+    materials: Vec<GpuMaterial>,
+    textured: bool,
 }
 
 impl GpuMesh {
@@ -76,10 +97,17 @@ pub struct Renderer {
     terrain_pipeline: wgpu::RenderPipeline,
     agent_pipeline: wgpu::RenderPipeline,
     building_pipeline: wgpu::RenderPipeline,
+    white_material: GpuMaterial,
+    terrain_material: GpuMaterial,
+    material_layout: wgpu::BindGroupLayout,
+    material_sampler: wgpu::Sampler,
     seed: u64,
+    model_dir: PathBuf,
     chunks: HashMap<ChunkCoord, GpuMesh>,
     agent_mesh: GpuMesh,
-    building_meshes: HashMap<String, GpuMesh>,
+    agent_surfaces: Vec<asset_pipeline::Surface>,
+    agent_materials: Vec<GpuMaterial>,
+    building_meshes: HashMap<String, GpuBuilding>,
     building_instances: wgpu::Buffer,
     building_instance_capacity: usize,
     building_instance_count: u32,
@@ -173,14 +201,45 @@ impl Renderer {
                 resource: globals.as_entire_binding(),
             }],
         });
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("material layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline layout"),
-            bind_group_layouts: &[&bind_layout],
+            bind_group_layouts: &[&bind_layout, &material_layout],
             push_constant_ranges: &[],
         });
 
-        let vertex_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
-        let instance_attrs = wgpu::vertex_attr_array![2 => Float32x4, 3 => Float32x4];
+        let vertex_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
+        let instance_attrs = wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4];
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -252,8 +311,86 @@ impl Renderer {
             &[vertex_layout.clone(), instance_layout.clone()],
         );
 
-        let (cv, ci) = humanoid_mesh();
+        let model_dir = assets::root().join("models");
+        let character_model =
+            asset_pipeline::load_gltf(model_dir.join("Humanoids/Superhero_Male_FullBody.gltf"))
+                .and_then(|mut model| {
+                    model.fit_height(1.8)?;
+                    Ok(model)
+                });
+        let character_model = character_model.or_else(|gltf_error| {
+            eprintln!("could not load character glTF: {gltf_error}");
+            asset_pipeline::load_obj(model_dir.join("humanoid.obj"))
+        });
+        let (cv, ci, agent_surfaces, material_definitions) = match character_model {
+            Ok(model) => (
+                model.vertices,
+                model.indices,
+                model.surfaces,
+                model.materials,
+            ),
+            Err(error) => {
+                eprintln!("could not load humanoid placeholder model: {error}");
+                let (vertices, indices) = humanoid_mesh();
+                let surfaces = vec![asset_pipeline::Surface {
+                    first_index: 0,
+                    index_count: indices.len() as u32,
+                    material_index: 0,
+                }];
+                (vertices, indices, surfaces, Vec::new())
+            }
+        };
         let agent_mesh = GpuMesh::new(&device, "humanoid", &cv, &ci);
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("base color sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let white_material = create_gpu_material(
+            &device,
+            &queue,
+            &material_layout,
+            &sampler,
+            [1.0; 4],
+            None,
+            "white fallback material",
+        );
+        let terrain_noise =
+            asset_pipeline::load_texture_file(model_dir.join("textures/T_Noise_Terrain.png"))
+                .map_err(|error| {
+                    eprintln!("could not load terrain noise texture: {error}");
+                    error
+                })
+                .ok();
+        let terrain_material = create_gpu_material(
+            &device,
+            &queue,
+            &material_layout,
+            &sampler,
+            [1.0; 4],
+            terrain_noise.as_deref(),
+            "terrain noise material",
+        );
+        let agent_materials = material_definitions
+            .iter()
+            .enumerate()
+            .map(|(index, material)| {
+                create_gpu_material(
+                    &device,
+                    &queue,
+                    &material_layout,
+                    &sampler,
+                    material.base_color,
+                    material.base_color_texture.as_deref(),
+                    &format!("agent material {index}"),
+                )
+            })
+            .collect();
         let instance_capacity = 1024;
         let instances = Self::make_instance_buffer(&device, instance_capacity);
         let building_instance_capacity = 128;
@@ -273,9 +410,16 @@ impl Renderer {
             terrain_pipeline,
             agent_pipeline,
             building_pipeline,
+            white_material,
+            terrain_material,
+            material_layout,
+            material_sampler: sampler,
             seed,
+            model_dir,
             chunks: HashMap::new(),
             agent_mesh,
+            agent_surfaces,
+            agent_materials,
             building_meshes: HashMap::new(),
             building_instances,
             building_instance_capacity,
@@ -398,10 +542,52 @@ impl Renderer {
         let mut building_instances = Vec::with_capacity(buildings.len());
         for building in buildings {
             if !self.building_meshes.contains_key(&building.def) {
-                let (vertices, indices) = building_mesh(building.footprint, &building.def);
+                let asset_root = self.model_dir.parent().unwrap_or(&self.model_dir);
+                let model = load_building_model(
+                    asset_root,
+                    &self.model_dir,
+                    building.footprint,
+                    &building.def,
+                );
+                let surfaces = if model.surfaces.is_empty() {
+                    vec![asset_pipeline::Surface {
+                        first_index: 0,
+                        index_count: model.indices.len() as u32,
+                        material_index: 0,
+                    }]
+                } else {
+                    model.surfaces.clone()
+                };
+                let textured = model
+                    .materials
+                    .iter()
+                    .any(|material| material.base_color_texture.is_some());
+                let materials = model
+                    .materials
+                    .iter()
+                    .enumerate()
+                    .map(|(index, material)| {
+                        create_gpu_material(
+                            &self.device,
+                            &self.queue,
+                            &self.material_layout,
+                            &self.material_sampler,
+                            material.base_color,
+                            material.base_color_texture.as_deref(),
+                            &format!("{} material {index}", building.def),
+                        )
+                    })
+                    .collect();
+                let mesh =
+                    GpuMesh::new(&self.device, &building.def, &model.vertices, &model.indices);
                 self.building_meshes.insert(
                     building.def.clone(),
-                    GpuMesh::new(&self.device, &building.def, &vertices, &indices),
+                    GpuBuilding {
+                        mesh,
+                        surfaces,
+                        materials,
+                        textured,
+                    },
                 );
             }
             let x = building.footprint.x as f32;
@@ -411,7 +597,11 @@ impl Renderer {
                 x + building.footprint.width as f32 * 0.5,
                 z + building.footprint.depth as f32 * 0.5,
             );
-            let color = building_color(&building.def);
+            let color = if self.building_meshes[&building.def].textured {
+                [1.0; 4]
+            } else {
+                building_color(&building.def)
+            };
             building_instances.push((
                 building.def.as_str(),
                 BuildingInstance {
@@ -488,6 +678,7 @@ impl Renderer {
             });
             pass.set_bind_group(0, &self.globals_bind, &[]);
             pass.set_pipeline(&self.terrain_pipeline);
+            pass.set_bind_group(1, &self.terrain_material.bind_group, &[]);
             for mesh in self.chunks.values() {
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -498,18 +689,44 @@ impl Renderer {
                 pass.set_vertex_buffer(0, self.agent_mesh.vertices.slice(..));
                 pass.set_vertex_buffer(1, self.instances.slice(..));
                 pass.set_index_buffer(self.agent_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..self.agent_mesh.index_count, 0, 0..self.instance_count);
+                for surface in &self.agent_surfaces {
+                    let material = self
+                        .agent_materials
+                        .get(surface.material_index)
+                        .unwrap_or(&self.white_material);
+                    pass.set_bind_group(1, &material.bind_group, &[]);
+                    pass.draw_indexed(
+                        surface.first_index..surface.first_index + surface.index_count,
+                        0,
+                        0..self.instance_count,
+                    );
+                }
             }
             if self.building_instance_count > 0 {
                 pass.set_pipeline(&self.building_pipeline);
+                pass.set_bind_group(1, &self.white_material.bind_group, &[]);
                 for (index, (definition, _)) in building_instances.iter().enumerate() {
-                    let Some(mesh) = self.building_meshes.get(*definition) else {
+                    let Some(building) = self.building_meshes.get(*definition) else {
                         continue;
                     };
-                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_vertex_buffer(0, building.mesh.vertices.slice(..));
                     pass.set_vertex_buffer(1, self.building_instances.slice(..));
-                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.index_count, 0, index as u32..index as u32 + 1);
+                    pass.set_index_buffer(
+                        building.mesh.indices.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    for surface in &building.surfaces {
+                        let material = building
+                            .materials
+                            .get(surface.material_index)
+                            .unwrap_or(&self.white_material);
+                        pass.set_bind_group(1, &material.bind_group, &[]);
+                        pass.draw_indexed(
+                            surface.first_index..surface.first_index + surface.index_count,
+                            0,
+                            index as u32..index as u32 + 1,
+                        );
+                    }
                 }
             }
         }
@@ -528,6 +745,158 @@ impl Renderer {
         );
         frame.present();
         Ok(())
+    }
+}
+
+fn load_building_model(
+    asset_root: &Path,
+    model_dir: &Path,
+    footprint: Footprint,
+    definition: &str,
+) -> asset_pipeline::Model {
+    if !definition
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return procedural_building_model(footprint, definition);
+    }
+
+    let prefab_path = asset_root
+        .join("prefabs")
+        .join("buildings")
+        .join(format!("{definition}.json"));
+    if prefab_path.is_file() {
+        match asset_pipeline::load_prefab(asset_root, &prefab_path) {
+            Ok(model) => return model,
+            Err(error) => {
+                eprintln!(
+                    "could not load building prefab {}: {error}",
+                    prefab_path.display()
+                );
+            }
+        }
+    }
+
+    let model_path = model_dir
+        .join("buildings")
+        .join(format!("{definition}.gltf"));
+    let imported = asset_pipeline::load_gltf(&model_path)
+        .or_else(|_| asset_pipeline::load_obj(model_path.with_extension("obj")));
+    match imported {
+        Ok(mut model) => match model.scale([footprint.width as f32, 1.0, footprint.depth as f32]) {
+            Ok(()) => model,
+            Err(error) => {
+                eprintln!(
+                    "could not scale building model {}: {error}",
+                    model_path.display()
+                );
+                procedural_building_model(footprint, definition)
+            }
+        },
+        Err(error) => {
+            eprintln!(
+                "could not load legacy building model {}: {error}",
+                model_path.display()
+            );
+            procedural_building_model(footprint, definition)
+        }
+    }
+}
+
+fn procedural_building_model(footprint: Footprint, definition: &str) -> asset_pipeline::Model {
+    let (vertices, indices) = building_mesh(footprint, definition);
+    asset_pipeline::Model {
+        vertices,
+        indices,
+        ..Default::default()
+    }
+}
+
+fn create_gpu_material(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    base_color: [f32; 4],
+    source: Option<&asset_pipeline::TextureData>,
+    label: &str,
+) -> GpuMaterial {
+    let fallback = [255_u8; 4];
+    let (width, height, pixels) = source.map_or((1, 1, fallback.as_slice()), |image| {
+        (image.width, image.height, image.rgba8.as_ref())
+    });
+    let unpadded_bytes_per_row = width * 4;
+    let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(alignment) * alignment;
+    let mut upload = vec![0; padded_bytes_per_row as usize * height as usize];
+    for row in 0..height as usize {
+        let source_start = row * unpadded_bytes_per_row as usize;
+        let destination_start = row * padded_bytes_per_row as usize;
+        upload[destination_start..destination_start + unpadded_bytes_per_row as usize]
+            .copy_from_slice(&pixels[source_start..source_start + unpadded_bytes_per_row as usize]);
+    }
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &upload,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(padded_bytes_per_row),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("material parameters"),
+        contents: bytemuck::bytes_of(&MaterialUniform { base_color }),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: uniform.as_entire_binding(),
+            },
+        ],
+    });
+    GpuMaterial {
+        _texture: texture,
+        _uniform: uniform,
+        bind_group,
     }
 }
 

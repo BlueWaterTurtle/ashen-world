@@ -1,12 +1,6 @@
-use bytemuck::{Pod, Zeroable};
 use core_sim::{height_at, ChunkCoord, Footprint, CHUNK_SIZE};
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-pub struct Vertex {
-    pub pos: [f32; 3],
-    pub normal: [f32; 3],
-}
+pub use asset_pipeline::Vertex;
 
 /// Meters between terrain mesh vertices.
 pub const TERRAIN_STEP: f32 = 2.0;
@@ -30,6 +24,7 @@ pub fn terrain_chunk_mesh(seed: u64, coord: ChunkCoord) -> (Vec<Vertex>, Vec<u32
             vertices.push(Vertex {
                 pos: [x, height_at(seed, x, z), z],
                 normal: [-dx / len, 1.0 / len, -dz / len],
+                uv: [x, z],
             });
         }
     }
@@ -64,8 +59,11 @@ impl MeshBuilder {
             points.swap(1, 3);
         }
         let normal = normalize(cross(sub(points[1], points[0]), sub(points[2], points[0])));
-        self.vertices
-            .extend(points.map(|pos| Vertex { pos, normal }));
+        self.vertices.extend(points.map(|pos| Vertex {
+            pos,
+            normal,
+            uv: [0.0; 2],
+        }));
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -80,8 +78,11 @@ impl MeshBuilder {
             points.swap(1, 2);
         }
         let normal = normalize(cross(sub(points[1], points[0]), sub(points[2], points[0])));
-        self.vertices
-            .extend(points.map(|pos| Vertex { pos, normal }));
+        self.vertices.extend(points.map(|pos| Vertex {
+            pos,
+            normal,
+            uv: [0.0; 2],
+        }));
         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
@@ -400,6 +401,58 @@ mod tests {
                     && vertex.pos[0] <= footprint.width as f32 + 0.1
                     && vertex.pos[2] >= -0.1
                     && vertex.pos[2] <= footprint.depth as f32 + 0.1
+            }));
+        }
+    }
+
+    #[test]
+    fn placeholder_assets_parse_with_valid_geometry() {
+        let asset_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models");
+        let model = asset_pipeline::load_obj(asset_dir.join("humanoid.obj")).unwrap();
+        assert!(!model.vertices.is_empty());
+        assert!(model
+            .indices
+            .iter()
+            .all(|&index| (index as usize) < model.vertices.len()));
+
+        for definition in [
+            "house",
+            "farm",
+            "iron_mine",
+            "workshop",
+            "wheat_storage",
+            "ore_storage",
+        ] {
+            let footprint = Footprint {
+                x: 0,
+                z: 0,
+                width: 6,
+                depth: 4,
+            };
+            let mut model = asset_pipeline::load_obj(
+                asset_dir
+                    .join("buildings")
+                    .join(format!("{definition}.obj")),
+            )
+            .unwrap_or_else(|error| panic!("could not load {definition}: {error}"));
+            model
+                .scale([footprint.width as f32, 1.0, footprint.depth as f32])
+                .unwrap();
+            assert!(
+                !model.vertices.is_empty(),
+                "{definition} should have geometry"
+            );
+            assert!(model
+                .indices
+                .iter()
+                .all(|&index| (index as usize) < model.vertices.len()));
+            assert!(model.vertices.iter().all(|vertex| {
+                vertex.pos[0] >= 0.0
+                    && vertex.pos[0] <= footprint.width as f32
+                    && vertex.pos[2] >= 0.0
+                    && vertex.pos[2] <= footprint.depth as f32
+                    && vertex.normal.iter().all(|component| component.is_finite())
             }));
         }
     }
