@@ -1,0 +1,17 @@
+(
+    parts: [
+        (asset: "models/buildings/WoodenWallOpen.gltf", translation: [1, 0, 0]),
+        (asset: "models/buildings/WoodenWallOpen.gltf", translation: [3, 0, 0]),
+        (asset: "models/buildings/WoodenWallOpen.gltf", translation: [1, 0, 4], rotation_y_degrees: 180),
+        (asset: "models/buildings/WoodenWallOpen.gltf", translation: [3, 0, 4], rotation_y_degrees: 180),
+        (asset: "models/buildings/WoodenWallOpen.gltf", translation: [0, 0, 1], rotation_y_degrees: 90),
+        (asset: "models/buildings/WoodenWallOpen.gltf", translation: [0, 0, 3], rotation_y_degrees: 90),
+        (asset: "models/buildings/WoodenWallOpen.gltf", translation: [4, 0, 1], rotation_y_degrees: -90),
+        (asset: "models/buildings/WoodenWallOpen.gltf", translation: [4, 0, 3], rotation_y_degrees: -90),
+        (asset: "models/buildings/WoodenFloor.gltf", translation: [1, 0, 1]),
+        (asset: "models/buildings/WoodenFloor.gltf", translation: [3, 0, 1]),
+        (asset: "models/buildings/WoodenFloor.gltf", translation: [1, 0, 3]),
+        (asset: "models/buildings/WoodenFloor.gltf", translation: [3, 0, 3]),
+        (asset: "models/buildings/IronMineSupport.gltf", translation: [2, 0, 2]),
+    ]
+)

@@ -1,0 +1,5 @@
+[
+  { id: "wander_far", name: "Wander far", wander_range: 40, pause_seconds_min: 1.0, pause_seconds_max: 5.0, speed_multiplier: 1.0 },
+  { id: "wander_near", name: "Wander near", wander_range: 10, pause_seconds_min: 2.0, pause_seconds_max: 8.0, speed_multiplier: 0.8 },
+  { id: "stationary", name: "Stationary", wander_range: 0, pause_seconds_min: 0.0, pause_seconds_max: 0.0, speed_multiplier: 1.0 },
+]

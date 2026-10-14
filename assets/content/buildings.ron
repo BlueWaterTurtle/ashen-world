@@ -1,0 +1,8 @@
+[
+  { id: "house", name: "House", width: 4, depth: 4, dwelling: true, cost: { wood: 20.0 } },
+  { id: "farm", name: "Farm", width: 8, depth: 8, min_fertility: 0.0, worker_slots: 1, input_slots: 1, output_slots: 2, stack_limit: 100, input_resources: ["wheat_seed"], output_resources: ["wheat"], crop: "wheat", cost: { wood: 10.0 } },
+  { id: "iron_mine", name: "Iron Mine", width: 4, depth: 4, requires_resource: "iron_ore", min_resource_richness: 0.0, worker_slots: 1, input_slots: 1, output_slots: 2, stack_limit: 100, input_resources: ["tools"], output_resources: ["iron_ore"], mine: true, cost: { wood: 30.0 } },
+  { id: "workshop", name: "Workshop", width: 6, depth: 5, worker_slots: 1, input_slots: 4, output_slots: 2, stack_limit: 100, input_resources: ["wheat", "iron_ore"], required_inputs: ["iron_ore"], output_resources: ["iron_ingot"], cost: { wood: 40.0, iron: 10.0 } },
+  { id: "wheat_storage", name: "Wheat Store", width: 4, depth: 4, worker_slots: 1, input_slots: 8, output_slots: 8, stack_limit: 250, input_resources: ["wheat"], output_resources: ["wheat"], storage: true, cost: { wood: 15.0 } },
+  { id: "ore_storage", name: "Ore Store", width: 4, depth: 4, worker_slots: 1, input_slots: 8, output_slots: 8, stack_limit: 250, input_resources: ["iron_ore"], output_resources: ["iron_ore"], storage: true, cost: { wood: 15.0 } },
+]

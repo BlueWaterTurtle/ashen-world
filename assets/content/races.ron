@@ -1,0 +1,12 @@
+[
+  { id: "human", name: "Human", base_stats: { strength: 10.0, dexterity: 10.0, toughness: 10.0 } },
+  (
+    id: "brute",
+    name: "Brute",
+    base_stats: { strength: 10.0, dexterity: 10.0, toughness: 10.0 },
+    modifiers: [
+      (stat: "strength", flat: 2.0, percent: 0.25),
+      (stat: "dexterity", percent: -0.2),
+    ],
+  ),
+]

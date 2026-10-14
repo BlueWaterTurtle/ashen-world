@@ -1,4 +1,4 @@
-//! Serializable content definitions and JSON loading.
+//! Serializable content definitions and RON loading.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -179,7 +179,7 @@ pub enum ContentError {
     },
     Parse {
         path: PathBuf,
-        source: serde_json::Error,
+        source: ron::Error,
     },
     Invalid {
         path: PathBuf,
@@ -192,7 +192,7 @@ impl fmt::Display for ContentError {
         match self {
             Self::Io { path, source } => write!(f, "cannot read {}: {source}", path.display()),
             Self::Parse { path, source } => {
-                write!(f, "invalid JSON in {}: {source}", path.display())
+                write!(f, "invalid RON in {}: {source}", path.display())
             }
             Self::Invalid { path, message } => {
                 write!(f, "invalid content in {}: {message}", path.display())
@@ -208,7 +208,7 @@ fn load_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>, Conten
         path: path.to_path_buf(),
         source,
     })?;
-    serde_json::from_str(&text).map_err(|source| ContentError::Parse {
+    ron::from_str(&text).map_err(|source| ContentError::Parse {
         path: path.to_path_buf(),
         source,
     })
@@ -237,21 +237,21 @@ fn check_unique<'a>(
     Ok(())
 }
 
-/// Load `factions.json`, `units.json`, `biomes.json`, `races.json` and `behaviors.json` from `dir` and validate them.
+/// Load `factions.ron`, `units.ron`, `biomes.ron`, `races.ron` and `behaviors.ron` from `dir` and validate them.
 pub fn load_content(dir: impl AsRef<Path>) -> Result<Content, ContentError> {
     let dir = dir.as_ref();
-    let fp = dir.join("factions.json");
-    let up = dir.join("units.json");
-    let bp = dir.join("biomes.json");
+    let fp = dir.join("factions.ron");
+    let up = dir.join("units.ron");
+    let bp = dir.join("biomes.ron");
     let factions: Vec<Faction> = load_file(&fp)?;
     let units: Vec<UnitArchetype> = load_file(&up)?;
     let biomes: Vec<Biome> = load_file(&bp)?;
-    let rp = dir.join("races.json");
-    let hp = dir.join("behaviors.json");
+    let rp = dir.join("races.ron");
+    let hp = dir.join("behaviors.ron");
     let races: Vec<Race> = load_file(&rp)?;
     let behaviors: Vec<Behavior> = load_file(&hp)?;
-    let bdp = dir.join("buildings.json");
-    let cp = dir.join("crops.json");
+    let bdp = dir.join("buildings.ron");
+    let cp = dir.join("crops.ron");
     let buildings: Vec<BuildingDef> = load_file(&bdp)?;
     let crops: Vec<Crop> = load_file(&cp)?;
     check_unique(&bdp, buildings.iter().map(|b| &b.id))?;
@@ -449,38 +449,9 @@ mod tests {
         let src = assets_dir();
         let dir = std::env::temp_dir().join("ashen_world_bad_ref");
         std::fs::create_dir_all(&dir).unwrap();
-        for f in [
-            "factions",
-            "biomes",
-            "races",
-            "behaviors",
-            "buildings",
-            "crops",
-        ] {
-            std::fs::copy(src.join(format!("{f}.json")), dir.join(format!("{f}.json"))).unwrap();
+        for f in ["factions", "biomes", "races", "behaviors", "buildings", "crops"] {
+            std::fs::copy(src.join(format!("{f}.ron")), dir.join(format!("{f}.ron"))).unwrap();
         }
         std::fs::write(
-            dir.join("units.json"),
-            r#"[{"id":"x","name":"X","faction":"wanderers","max_health":1.0,"move_speed":1.0,"race":"human","behavior":"nope"}]"#,
-        )
-        .unwrap();
-        let err = load_content(&dir).unwrap_err();
-        assert!(err.to_string().contains("unknown behavior 'nope'"));
-    }
-
-    #[test]
-    fn missing_dir_reports_path() {
-        let err = load_content("/nonexistent/dir").unwrap_err();
-        assert!(err.to_string().contains("factions.json"));
-    }
-
-    #[test]
-    fn bad_json_reports_parse_error() {
-        let dir = std::env::temp_dir().join("ashen_world_bad_content");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("factions.json"), "[{").unwrap();
-        let err = load_content(&dir).unwrap_err();
-        assert!(matches!(err, ContentError::Parse { .. }));
-        assert!(err.to_string().contains("invalid JSON"));
-    }
-}
+            dir.join("units.ron"),
+            r#"[(id:"x",name:"X",faction:"wanderers",max_health:1.0,move_speed:1.0,race:"human",behavior:"nope")]

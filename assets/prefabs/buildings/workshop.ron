@@ -1,0 +1,13 @@
+(
+    parts: [
+        (asset: "models/buildings/Workbench.gltf", translation: [1, 0, 1]),
+        (asset: "models/buildings/Workbench.gltf", translation: [4, 0, 1]),
+        (asset: "models/buildings/Workbench.gltf", translation: [1, 0, 3]),
+        (asset: "models/buildings/Workbench.gltf", translation: [4, 0, 3]),
+        (asset: "models/buildings/Workbench.gltf", translation: [1, 0, 4]),
+        (asset: "models/buildings/Workbench.gltf", translation: [4, 0, 4]),
+        (asset: "models/buildings/Workbench.gltf", translation: [2.5, 0, 2.5]),
+        (asset: "models/buildings/Workbench.gltf", translation: [3.5, 0, 2.5]),
+        (asset: "models/buildings/WorkshopRoof.gltf", translation: [3, 3.25, 2.5]),
+    ]
+)
