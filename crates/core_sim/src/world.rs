@@ -8,7 +8,7 @@ use crate::npc::{
 };
 use crate::path::{Cell, Pathfinder};
 use crate::rng::Rng;
-use crate::terrain::{height_at, WalkabilityCache};
+use crate::terrain::{TerrainEdit, TerrainEdits, WalkabilityCache};
 
 /// Fixed simulation rate.
 pub const TICKS_PER_SECOND: u32 = 30;
@@ -135,6 +135,8 @@ pub struct World {
     pub max_path_requests_per_tick: usize,
     rng: Rng,
     walkability_cache: WalkabilityCache,
+    terrain_edits: TerrainEdits,
+    pending_terrain_edits: VecDeque<TerrainEdit>,
     pathfinder: Pathfinder,
     /// FIFO of agents that may be ready for a wander request. Agents are enqueued when
     /// they become idle, so per-tick scheduling cost scales with requests served.
@@ -184,8 +186,8 @@ impl World {
                 );
                 let pos = WorldPos::from_chunk_local(ChunkCoord::new(cx, cz), local);
                 let cell = (pos.x.floor() as i32, pos.z.floor() as i32);
-                if walkability_cache.is_walkable(config.seed, cell) {
-                    let y = height_at(config.seed, pos.x, pos.z);
+                if walkability_cache.is_walkable(config.seed, &TerrainEdits::default(), cell) {
+                    let y = crate::terrain::height_at(config.seed, pos.x, pos.z);
                     break WorldPos::new(pos.x, y, pos.z);
                 }
             };
@@ -226,6 +228,8 @@ impl World {
             max_path_requests_per_tick: config.max_path_requests_per_tick,
             rng,
             walkability_cache,
+            terrain_edits: TerrainEdits::default(),
+            pending_terrain_edits: VecDeque::new(),
             pathfinder: Pathfinder::new(),
             wander_queue,
             wander_queued: vec![true; config.agent_count],
@@ -491,11 +495,18 @@ impl World {
                 record.position.x.floor() as i32,
                 record.position.z.floor() as i32,
             );
-            if !self.walkability_cache.is_walkable(self.seed, cell) {
+            if !self
+                .walkability_cache
+                .is_walkable(self.seed, &self.terrain_edits, cell)
+            {
                 if let Some(walkable) = self.find_nearest_walkable_cell(cell, 3) {
                     record.position = WorldPos::new(
                         walkable.0 as f32 + 0.5,
-                        height_at(self.seed, walkable.0 as f32 + 0.5, walkable.1 as f32 + 0.5),
+                        self.terrain_edits.height(
+                            self.seed,
+                            walkable.0 as f32 + 0.5,
+                            walkable.1 as f32 + 0.5,
+                        ),
                         walkable.1 as f32 + 0.5,
                     );
                 }
@@ -554,7 +565,10 @@ impl World {
         center: (i32, i32),
         max_radius: i32,
     ) -> Option<(i32, i32)> {
-        if self.walkability_cache.is_walkable(self.seed, center) {
+        if self
+            .walkability_cache
+            .is_walkable(self.seed, &self.terrain_edits, center)
+        {
             return Some(center);
         }
         for r in 1..=max_radius {
@@ -564,7 +578,10 @@ impl World {
                         continue;
                     }
                     let c = (center.0 + dx, center.1 + dz);
-                    if self.walkability_cache.is_walkable(self.seed, c) {
+                    if self
+                        .walkability_cache
+                        .is_walkable(self.seed, &self.terrain_edits, c)
+                    {
                         return Some(c);
                     }
                 }
@@ -597,7 +614,8 @@ impl World {
                 };
                 let snapped = WorldPos::new(
                     cx as f32 + 0.5,
-                    height_at(self.seed, cx as f32 + 0.5, cz as f32 + 0.5),
+                    self.terrain_edits
+                        .height(self.seed, cx as f32 + 0.5, cz as f32 + 0.5),
                     cz as f32 + 0.5,
                 );
                 self.set_position(e, snapped);
@@ -619,7 +637,11 @@ impl World {
                         if let Some(&(cx, cz)) = wp.back() {
                             let dest = WorldPos::new(
                                 cx as f32 + 0.5,
-                                height_at(self.seed, cx as f32 + 0.5, cz as f32 + 0.5),
+                                self.terrain_edits.height(
+                                    self.seed,
+                                    cx as f32 + 0.5,
+                                    cz as f32 + 0.5,
+                                ),
                                 cz as f32 + 0.5,
                             );
                             if let Ok(mut g) = self.ecs.get::<&mut NavGoal>(id) {
@@ -745,10 +767,11 @@ impl World {
         let goal_cell = (goal.x.floor() as i32, goal.z.floor() as i32);
         let seed = self.seed;
         let cache = &mut self.walkability_cache;
+        let edits = &self.terrain_edits;
         match self
             .pathfinder
             .find_path(start, goal_cell, PATH_BUDGET, |c| {
-                cache.is_walkable(seed, c)
+                cache.is_walkable(seed, edits, c)
             }) {
             Some(path) => {
                 if let Ok(mut c) = self.ecs.get::<&mut Path>(id) {
@@ -763,8 +786,79 @@ impl World {
         }
     }
 
+    /// Terrain edits applied so far, layered over the procedural heightmap.
+    pub fn terrain_edits(&self) -> &TerrainEdits {
+        &self.terrain_edits
+    }
+
+    /// Replace the terrain edits wholesale (e.g. when loading a save).
+    pub fn set_terrain_edits(&mut self, edits: TerrainEdits) {
+        self.pending_terrain_edits.clear();
+        self.terrain_edits = edits;
+        self.walkability_cache = WalkabilityCache::default();
+        self.refresh_agents_after_terrain_change();
+    }
+
+    /// Queue a terrain edit; it is applied at the start of the next tick, in queue order.
+    pub fn queue_terrain_edit(&mut self, edit: TerrainEdit) {
+        self.pending_terrain_edits.push_back(edit);
+    }
+
+    fn apply_pending_terrain_edits(&mut self) {
+        if self.pending_terrain_edits.is_empty() {
+            return;
+        }
+        while let Some(edit) = self.pending_terrain_edits.pop_front() {
+            for chunk in self.terrain_edits.apply(self.seed, edit) {
+                self.walkability_cache.invalidate(chunk);
+            }
+        }
+        self.refresh_agents_after_terrain_change();
+    }
+
+    /// Re-seat agents on the edited surface and re-plan any path that now crosses
+    /// unwalkable cells.
+    fn refresh_agents_after_terrain_change(&mut self) {
+        for e in self.entities() {
+            let p = self.position(e);
+            let y = self.terrain_edits.height(self.seed, p.x, p.z);
+            self.set_position(e, WorldPos::new(p.x, y, p.z));
+
+            let Some(&id) = self.ids.get(e.0 as usize) else {
+                continue;
+            };
+            let waypoints: Vec<Cell> = self
+                .ecs
+                .get::<&Path>(id)
+                .ok()
+                .and_then(|path| path.0.as_ref().map(|w| w.iter().copied().collect()))
+                .unwrap_or_default();
+            let blocked = waypoints.iter().any(|&c| {
+                !self
+                    .walkability_cache
+                    .is_walkable(self.seed, &self.terrain_edits, c)
+            });
+            if !blocked {
+                continue;
+            }
+            let goal = self.nav_goal(e);
+            if let Ok(mut path) = self.ecs.get::<&mut Path>(id) {
+                path.0 = None;
+            }
+            if let Ok(mut v) = self.ecs.get::<&mut Velocity>(id) {
+                v.0 = WorldPos::default();
+            }
+            let replanned = goal.is_some_and(|g| self.navigate_to(e, g));
+            if !replanned {
+                self.set_nav_goal(e, None);
+                self.set_pause(e, WANDER_BACKOFF_TICKS);
+            }
+        }
+    }
+
     /// Advance the simulation by exactly one fixed tick.
     pub fn step(&mut self) {
+        self.apply_pending_terrain_edits();
         if self.lod.enabled {
             self.update_simulation_tiers();
         }
@@ -815,7 +909,10 @@ impl World {
             let dz = (self.rng.next_u64() % span) as i32 - r;
             goal = WorldPos::new(p.x + dx as f32, 0.0, p.z + dz as f32);
             let cell = (goal.x.floor() as i32, goal.z.floor() as i32);
-            if self.walkability_cache.is_walkable(self.seed, cell) {
+            if self
+                .walkability_cache
+                .is_walkable(self.seed, &self.terrain_edits, cell)
+            {
                 break;
             }
         }
@@ -824,6 +921,7 @@ impl World {
 
     fn follow_paths(&mut self) {
         let seed = self.seed;
+        let edits = &self.terrain_edits;
         let behaviors = &self.behaviors;
         let rng = &mut self.rng;
         let queue = &mut self.wander_queue;
@@ -885,14 +983,14 @@ impl World {
                     let (dx, dz) = (tx - pos.0.x, tz - pos.0.z);
                     let dist = (dx * dx + dz * dz).sqrt();
                     if dist <= step_len {
-                        pos.0 = WorldPos::new(tx, height_at(seed, tx, tz), tz);
+                        pos.0 = WorldPos::new(tx, edits.height(seed, tx, tz), tz);
                         vel.0 = WorldPos::default();
                         wp.pop_front();
                     } else {
                         vel.0 = WorldPos::new(dx / dist * b.speed, 0.0, dz / dist * b.speed);
                         pos.0.x += vel.0.x * TICK_DT;
                         pos.0.z += vel.0.z * TICK_DT;
-                        pos.0.y = height_at(seed, pos.0.x, pos.0.z);
+                        pos.0.y = edits.height(seed, pos.0.x, pos.0.z);
                     }
                 }
                 SimTier::Reduced => {
@@ -935,14 +1033,14 @@ impl World {
                     let (dx, dz) = (tx - pos.0.x, tz - pos.0.z);
                     let dist = (dx * dx + dz * dz).sqrt();
                     if dist <= step_len {
-                        pos.0 = WorldPos::new(tx, height_at(seed, tx, tz), tz);
+                        pos.0 = WorldPos::new(tx, edits.height(seed, tx, tz), tz);
                         vel.0 = WorldPos::default();
                         wp.pop_front();
                     } else {
                         vel.0 = WorldPos::new(dx / dist * b.speed, 0.0, dz / dist * b.speed);
                         pos.0.x += vel.0.x * TICK_DT * (reduced_interval as f32);
                         pos.0.z += vel.0.z * TICK_DT * (reduced_interval as f32);
-                        pos.0.y = height_at(seed, pos.0.x, pos.0.z);
+                        pos.0.y = edits.height(seed, pos.0.x, pos.0.z);
                     }
                 }
                 SimTier::Dormant => {
@@ -1167,7 +1265,7 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terrain::is_walkable;
+    use crate::terrain::{height_at, is_walkable};
 
     fn cfg(seed: u64) -> WorldConfig {
         WorldConfig {
@@ -1990,5 +2088,38 @@ mod tests {
         assert!(reduced_count > 0, "should have reduced agents");
         assert!(dormant_count > 0, "should have dormant agents");
         assert_eq!(active_count + reduced_count + dormant_count, 1000);
+    }
+
+    #[test]
+    fn queued_terrain_edits_apply_on_tick_and_keep_agents_grounded() {
+        let config = WorldConfig {
+            seed: 42,
+            agent_count: 50,
+            ..WorldConfig::default()
+        };
+        let mut w = World::generate(&config);
+        let mut twin = World::generate(&config);
+        let center = {
+            let p = w.position(Entity(0));
+            (p.x.floor() as i32, p.z.floor() as i32)
+        };
+        let edit = TerrainEdit::Raise {
+            center,
+            radius: 10,
+            amount_mm: 6000,
+        };
+        w.queue_terrain_edit(edit);
+        twin.queue_terrain_edit(edit);
+        assert!(w.terrain_edits().is_empty());
+        for _ in 0..20 {
+            w.step();
+            twin.step();
+        }
+        assert!(!w.terrain_edits().is_empty());
+        for e in w.entities() {
+            let p = w.position(e);
+            assert!((p.y - w.terrain_edits().height(w.seed, p.x, p.z)).abs() < 1e-3);
+        }
+        assert!(w.positions().eq(twin.positions()));
     }
 }

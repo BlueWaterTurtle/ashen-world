@@ -4,7 +4,9 @@ use crate::npc::{Inventory, ItemStack};
 use crate::production::MineProduction;
 #[cfg(test)]
 use crate::resource::ResourceKind;
-use crate::terrain::{fertility_at, height_at, resource_richness_at, MAX_STEP_HEIGHT};
+use crate::terrain::{
+    fertility_at, resource_richness_at, TerrainEdit, TerrainEdits, MAX_STEP_HEIGHT,
+};
 use crate::world::Entity;
 
 /// Axis-aligned footprint in world cells: `[x, x + width) x [z, z + depth)`.
@@ -284,21 +286,30 @@ pub struct Buildings {
 }
 
 impl Buildings {
+    /// Whether applying `edit` keeps every existing building's footprint within the slope limit.
+    pub fn terrain_edit_is_allowed(
+        &self,
+        seed: u64,
+        edits: &TerrainEdits,
+        edit: TerrainEdit,
+    ) -> bool {
+        let mut edited = edits.clone();
+        edited.apply(seed, edit);
+        self.buildings
+            .iter()
+            .all(|b| footprint_slope_ok(seed, &edited, b.footprint))
+    }
+
     /// Check whether `fp` is a legal placement. Returns the first reason it is not.
     pub fn validate(
         &self,
         seed: u64,
+        edits: &TerrainEdits,
         fp: Footprint,
         rules: &PlacementRules,
     ) -> Result<(), PlaceError> {
-        let h = |x: i32, z: i32| height_at(seed, x as f32 + 0.5, z as f32 + 0.5);
-        let base = h(fp.x, fp.z);
-        for z in fp.z..fp.z + fp.depth {
-            for x in fp.x..fp.x + fp.width {
-                if (h(x, z) - base).abs() > MAX_STEP_HEIGHT * fp.width.max(fp.depth) as f32 {
-                    return Err(PlaceError::TooSteep);
-                }
-            }
+        if !footprint_slope_ok(seed, edits, fp) {
+            return Err(PlaceError::TooSteep);
         }
         if self.protected.iter().any(|p| p.overlaps(&fp, 0)) {
             return Err(PlaceError::InProtectedZone);
@@ -336,22 +347,24 @@ impl Buildings {
     pub fn place(
         &mut self,
         seed: u64,
+        edits: &TerrainEdits,
         def: &str,
         fp: Footprint,
         rules: &PlacementRules,
     ) -> Result<usize, PlaceError> {
-        self.place_with_logistics(seed, def, fp, rules, BuildingLogistics::default())
+        self.place_with_logistics(seed, edits, def, fp, rules, BuildingLogistics::default())
     }
 
     pub fn place_with_logistics(
         &mut self,
         seed: u64,
+        edits: &TerrainEdits,
         def: &str,
         fp: Footprint,
         rules: &PlacementRules,
         logistics: BuildingLogistics,
     ) -> Result<usize, PlaceError> {
-        self.validate(seed, fp, rules)?;
+        self.validate(seed, edits, fp, rules)?;
         self.buildings.push(Building {
             def: def.to_string(),
             footprint: fp,
@@ -629,6 +642,15 @@ impl Buildings {
 }
 
 /// Average resource richness across all cells covered by a footprint.
+/// Whether every cell of `fp` is within the slope limit of its corner cell.
+fn footprint_slope_ok(seed: u64, edits: &TerrainEdits, fp: Footprint) -> bool {
+    let h = |x: i32, z: i32| edits.height(seed, x as f32 + 0.5, z as f32 + 0.5);
+    let base = h(fp.x, fp.z);
+    let limit = MAX_STEP_HEIGHT * fp.width.max(fp.depth) as f32;
+    (fp.z..fp.z + fp.depth)
+        .all(|z| (fp.x..fp.x + fp.width).all(|x| (h(x, z) - base).abs() <= limit))
+}
+
 pub fn average_resource_richness(seed: u64, fp: Footprint, resource: &str) -> f32 {
     footprint_average(fp, |x, z| {
         resource_richness_at(seed, resource, x as f32 + 0.5, z as f32 + 0.5)
@@ -689,14 +711,16 @@ mod tests {
     fn placement_rules() {
         let mut b = Buildings::default();
         let rules = PlacementRules::default();
-        assert!(b.place(1, "house", fp(0, 0, 2, 2), &rules).is_ok());
+        assert!(b
+            .place(1, &TerrainEdits::default(), "house", fp(0, 0, 2, 2), &rules)
+            .is_ok());
         assert_eq!(
-            b.validate(1, fp(1, 1, 2, 2), &rules),
+            b.validate(1, &TerrainEdits::default(), fp(1, 1, 2, 2), &rules),
             Err(PlaceError::Overlaps)
         );
         b.protected.push(fp(100, 100, 50, 50));
         assert_eq!(
-            b.validate(1, fp(110, 110, 2, 2), &rules),
+            b.validate(1, &TerrainEdits::default(), fp(110, 110, 2, 2), &rules),
             Err(PlaceError::InProtectedZone)
         );
         let mine = PlacementRules {
@@ -706,14 +730,16 @@ mod tests {
             building_margin: 0,
         };
         assert_eq!(
-            b.validate(1, fp(10, 10, 2, 2), &mine),
+            b.validate(1, &TerrainEdits::default(), fp(10, 10, 2, 2), &mine),
             Err(PlaceError::MissingResource("iron_ore".into()))
         );
         b.resources.push(ResourceNode {
             kind: "iron_ore".into(),
             cell: (11, 11),
         });
-        assert!(b.validate(1, fp(10, 10, 2, 2), &mine).is_ok());
+        assert!(b
+            .validate(1, &TerrainEdits::default(), fp(10, 10, 2, 2), &mine)
+            .is_ok());
 
         let rich_site = PlacementRules {
             requires_resource: Some("iron_ore".into()),
@@ -721,26 +747,40 @@ mod tests {
             minimum_fertility: None,
             building_margin: 0,
         };
-        assert!(b.validate(1, fp(10, 10, 1, 1), &rich_site).is_ok());
+        assert!(b
+            .validate(1, &TerrainEdits::default(), fp(10, 10, 1, 1), &rich_site)
+            .is_ok());
         let impossible_richness = PlacementRules {
             minimum_resource_richness: Some(1.0),
             ..rich_site.clone()
         };
         assert_eq!(
-            b.validate(1, fp(10, 10, 1, 1), &impossible_richness),
+            b.validate(
+                1,
+                &TerrainEdits::default(),
+                fp(10, 10, 1, 1),
+                &impossible_richness
+            ),
             Err(PlaceError::InsufficientResourceRichness("iron_ore".into()))
         );
         let fertile_site = PlacementRules {
             minimum_fertility: Some(0.0),
             ..PlacementRules::default()
         };
-        assert!(b.validate(1, fp(10, 10, 1, 1), &fertile_site).is_ok());
+        assert!(b
+            .validate(1, &TerrainEdits::default(), fp(10, 10, 1, 1), &fertile_site)
+            .is_ok());
         let impossible_fertility = PlacementRules {
             minimum_fertility: Some(1.0),
             ..PlacementRules::default()
         };
         assert_eq!(
-            b.validate(1, fp(10, 10, 1, 1), &impossible_fertility),
+            b.validate(
+                1,
+                &TerrainEdits::default(),
+                fp(10, 10, 1, 1),
+                &impossible_fertility
+            ),
             Err(PlaceError::InsufficientFertility)
         );
         assert!(b.blocks((1, 1)) && !b.blocks((5, 5)));
@@ -753,6 +793,7 @@ mod tests {
         let farm = buildings
             .place_with_logistics(
                 1,
+                &TerrainEdits::default(),
                 "farm",
                 fp(0, 0, 1, 1),
                 &rules,
@@ -772,6 +813,7 @@ mod tests {
         let storage = buildings
             .place_with_logistics(
                 1,
+                &TerrainEdits::default(),
                 "wheat_storage",
                 fp(5, 0, 1, 1),
                 &rules,
@@ -863,6 +905,7 @@ mod tests {
         let mine = buildings
             .place_with_logistics(
                 1,
+                &TerrainEdits::default(),
                 "iron_mine",
                 Footprint {
                     x: 0,
@@ -903,6 +946,7 @@ mod tests {
         let i = buildings
             .place_with_logistics(
                 1,
+                &TerrainEdits::default(),
                 "mine",
                 fp,
                 &PlacementRules::default(),
@@ -929,5 +973,27 @@ mod tests {
         assert!(!buildings.buildings[i]
             .footprint
             .contains((pos.x.floor() as i32, pos.z.floor() as i32)));
+    }
+
+    #[test]
+    fn terrain_edits_that_make_buildings_too_steep_are_rejected() {
+        let mut b = Buildings::default();
+        let rules = PlacementRules::default();
+        let site = fp(10, 10, 2, 2);
+        let placed = b.place(1, &TerrainEdits::default(), "house", site, &rules);
+        assert!(placed.is_ok());
+        let edits = TerrainEdits::default();
+        let cliff = TerrainEdit::Raise {
+            center: (10, 10),
+            radius: 1,
+            amount_mm: 30_000,
+        };
+        assert!(!b.terrain_edit_is_allowed(1, &edits, cliff));
+        let elsewhere = TerrainEdit::Raise {
+            center: (60, 60),
+            radius: 4,
+            amount_mm: 3000,
+        };
+        assert!(b.terrain_edit_is_allowed(1, &edits, elsewhere));
     }
 }

@@ -1,4 +1,4 @@
-use core_sim::{height_at, ChunkCoord, Footprint, CHUNK_SIZE};
+use core_sim::{ChunkCoord, Footprint, TerrainEdits, CHUNK_SIZE};
 
 pub use asset_pipeline::Vertex;
 
@@ -8,21 +8,26 @@ pub const TERRAIN_STEP: f32 = 2.0;
 pub const TERRAIN_QUADS: usize = (CHUNK_SIZE / TERRAIN_STEP) as usize;
 
 /// Heightmap mesh for one chunk. Heights and normals come straight from the continuous
-/// height function, so neighbouring chunks line up with no seams.
-pub fn terrain_chunk_mesh(seed: u64, coord: ChunkCoord) -> (Vec<Vertex>, Vec<u32>) {
+/// height function (procedural terrain plus `edits`), so neighbouring chunks line up with no seams.
+pub fn terrain_chunk_mesh(
+    seed: u64,
+    edits: &TerrainEdits,
+    coord: ChunkCoord,
+) -> (Vec<Vertex>, Vec<u32>) {
     let (ox, oz) = coord.origin();
     let n = TERRAIN_QUADS + 1;
+    let height_at = |x: f32, z: f32| edits.height(seed, x, z);
     let mut vertices = Vec::with_capacity(n * n);
     for iz in 0..n {
         for ix in 0..n {
             let x = ox + ix as f32 * TERRAIN_STEP;
             let z = oz + iz as f32 * TERRAIN_STEP;
             let e = 1.0;
-            let dx = (height_at(seed, x + e, z) - height_at(seed, x - e, z)) / (2.0 * e);
-            let dz = (height_at(seed, x, z + e) - height_at(seed, x, z - e)) / (2.0 * e);
+            let dx = (height_at(x + e, z) - height_at(x - e, z)) / (2.0 * e);
+            let dz = (height_at(x, z + e) - height_at(x, z - e)) / (2.0 * e);
             let len = (dx * dx + 1.0 + dz * dz).sqrt();
             vertices.push(Vertex {
-                pos: [x, height_at(seed, x, z), z],
+                pos: [x, height_at(x, z), z],
                 normal: [-dx / len, 1.0 / len, -dz / len],
                 uv: [x, z],
             });
@@ -331,7 +336,7 @@ mod tests {
 
     #[test]
     fn terrain_mesh_counts_and_indices_in_range() {
-        let (v, i) = terrain_chunk_mesh(1, ChunkCoord::new(0, 0));
+        let (v, i) = terrain_chunk_mesh(1, &TerrainEdits::default(), ChunkCoord::new(0, 0));
         assert_eq!(v.len(), (TERRAIN_QUADS + 1) * (TERRAIN_QUADS + 1));
         assert_eq!(i.len(), TERRAIN_QUADS * TERRAIN_QUADS * 6);
         assert!(i.iter().all(|&x| (x as usize) < v.len()));
@@ -339,7 +344,7 @@ mod tests {
 
     #[test]
     fn terrain_faces_up_and_normals_are_unit() {
-        let (v, i) = terrain_chunk_mesh(7, ChunkCoord::new(-1, 2));
+        let (v, i) = terrain_chunk_mesh(7, &TerrainEdits::default(), ChunkCoord::new(-1, 2));
         for t in i.chunks(3) {
             assert!(
                 tri_normal(&v, t)[1] > 0.0,
@@ -355,8 +360,8 @@ mod tests {
 
     #[test]
     fn neighbouring_chunks_share_border_vertices() {
-        let (a, _) = terrain_chunk_mesh(3, ChunkCoord::new(0, 0));
-        let (b, _) = terrain_chunk_mesh(3, ChunkCoord::new(1, 0));
+        let (a, _) = terrain_chunk_mesh(3, &TerrainEdits::default(), ChunkCoord::new(0, 0));
+        let (b, _) = terrain_chunk_mesh(3, &TerrainEdits::default(), ChunkCoord::new(1, 0));
         let n = TERRAIN_QUADS + 1;
         for iz in 0..n {
             let right_edge = a[iz * n + TERRAIN_QUADS];

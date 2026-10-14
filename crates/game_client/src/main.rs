@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use camera::Camera;
 use core_sim::{
-    height_at, Behavior, BuildingLogistics, Buildings, Footprint, Job, Jobs, PlacementRules,
+    Behavior, BuildingLogistics, Buildings, Footprint, Job, Jobs, PlacementRules, TerrainEdit,
     WorkerActivity, World, WorldConfig, WorldPos, TICK_DT,
 };
 use glam::{Mat4, Vec3, Vec4};
@@ -103,6 +103,41 @@ struct Input {
     selection_rect: Option<[f32; 4]>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TerrainTool {
+    Raise,
+    Lower,
+    Flatten,
+    Smooth,
+    Slope,
+}
+
+/// Terrain editor mode: while active, left clicks reshape the terrain instead of selecting.
+struct TerrainEditor {
+    active: bool,
+    tool: TerrainTool,
+    radius: i32,
+    strength_mm: i32,
+    slope_start: Option<(i32, i32)>,
+}
+
+impl TerrainEditor {
+    fn status(&self) -> String {
+        let tool = match self.tool {
+            TerrainTool::Raise => "Raise",
+            TerrainTool::Lower => "Lower",
+            TerrainTool::Flatten => "Flatten",
+            TerrainTool::Smooth => "Smooth",
+            TerrainTool::Slope => "Slope (click start, then end)",
+        };
+        format!(
+            "Terrain editor: {tool}, radius {} m, strength {:.1} m. F1-F5 tool, [ ] radius, - = strength, T exits.",
+            self.radius,
+            self.strength_mm as f32 / 1000.0
+        )
+    }
+}
+
 struct Stats {
     window_start: Instant,
     frames: u32,
@@ -117,6 +152,7 @@ struct App {
     building_defs: Vec<content::BuildingDef>,
     build_mode: Option<String>,
     build_status: Option<String>,
+    editor: TerrainEditor,
     camera: Camera,
     input: Input,
     accumulator: f32,
@@ -140,6 +176,13 @@ impl App {
             building_defs,
             build_mode: None,
             build_status: None,
+            editor: TerrainEditor {
+                active: false,
+                tool: TerrainTool::Raise,
+                radius: 6,
+                strength_mm: 1000,
+                slope_start: None,
+            },
             camera: Camera::default(),
             input: Input::default(),
             accumulator: 0.0,
@@ -153,6 +196,60 @@ impl App {
             renderer: None,
             ui: None,
             agent_instances: Vec::new(),
+        }
+    }
+
+    /// Queue the active terrain tool at lattice point `at`, unless it would leave an
+    /// existing building on a slope too steep to stand on.
+    fn apply_terrain_tool(&mut self, at: (i32, i32)) {
+        let editor = &mut self.editor;
+        let edit = match editor.tool {
+            TerrainTool::Raise => TerrainEdit::Raise {
+                center: at,
+                radius: editor.radius,
+                amount_mm: editor.strength_mm,
+            },
+            TerrainTool::Lower => TerrainEdit::Lower {
+                center: at,
+                radius: editor.radius,
+                amount_mm: editor.strength_mm,
+            },
+            TerrainTool::Flatten => {
+                let target =
+                    self.world
+                        .terrain_edits()
+                        .height(self.world.seed, at.0 as f32, at.1 as f32);
+                TerrainEdit::Flatten {
+                    center: at,
+                    radius: editor.radius,
+                    target_mm: (target * 1000.0).round() as i32,
+                }
+            }
+            TerrainTool::Smooth => TerrainEdit::Smooth {
+                center: at,
+                radius: editor.radius,
+            },
+            TerrainTool::Slope => match editor.slope_start.take() {
+                None => {
+                    editor.slope_start = Some(at);
+                    self.build_status = Some("Slope start set; click the end point.".into());
+                    return;
+                }
+                Some(from) => TerrainEdit::Slope {
+                    from,
+                    to: at,
+                    half_width: editor.radius,
+                },
+            },
+        };
+        if self
+            .buildings
+            .terrain_edit_is_allowed(self.world.seed, self.world.terrain_edits(), edit)
+        {
+            self.world.queue_terrain_edit(edit);
+            self.build_status = Some(self.editor.status());
+        } else {
+            self.build_status = Some("Edit would leave a building on too steep a slope.".into());
         }
     }
 
@@ -173,6 +270,26 @@ impl App {
         ) else {
             return;
         };
+
+        if self.editor.active {
+            let mut hit = ground;
+            for _ in 0..3 {
+                let y = self
+                    .world
+                    .terrain_edits()
+                    .height(self.world.seed, hit.x, hit.z);
+                let (width, height) = (size.width as f32, size.height as f32);
+                match self
+                    .camera
+                    .ground_intersection(screen_x, screen_y, width, height, y)
+                {
+                    Some(refined) => hit = refined,
+                    None => break,
+                }
+            }
+            self.apply_terrain_tool((hit.x.round() as i32, hit.z.round() as i32));
+            return;
+        }
 
         if let Some(definition_id) = self.build_mode.clone() {
             let Some(definition) = self
@@ -208,6 +325,7 @@ impl App {
             };
             match self.buildings.place_with_logistics(
                 self.world.seed,
+                self.world.terrain_edits(),
                 &definition.id,
                 footprint,
                 &rules,
@@ -307,6 +425,7 @@ impl App {
                     }
                 }
                 UiAction::SelectBuilding(id) => {
+                    self.editor.active = false;
                     self.build_mode = Some(id.clone());
                     self.build_status = None;
                     if let Some(ui) = &mut self.ui {
@@ -352,7 +471,10 @@ impl App {
             axis(self.input.forward, self.input.back) * speed,
         );
         let seed = self.world.seed;
-        self.camera.target.y = height_at(seed, self.camera.target.x, self.camera.target.z);
+        self.camera.target.y =
+            self.world
+                .terrain_edits()
+                .height(seed, self.camera.target.x, self.camera.target.z);
         self.world.set_focus_points(vec![core_sim::WorldPos::new(
             self.camera.target.x,
             0.0,
@@ -363,7 +485,7 @@ impl App {
             self.camera.aspect = r.aspect();
             let t = self.camera.target;
             let center = core_sim::WorldPos::new(t.x, 0.0, t.z).chunk();
-            r.update_chunks(center, VIEW_RADIUS_CHUNKS);
+            r.update_chunks(center, VIEW_RADIUS_CHUNKS, self.world.terrain_edits());
             let view_proj = self.camera.view_proj();
             self.agent_instances.clear();
             for e in self.world.entities() {
@@ -399,6 +521,7 @@ impl App {
                 &self.camera,
                 &self.agent_instances,
                 &self.buildings.buildings,
+                self.world.terrain_edits(),
                 ui,
                 pixels_per_point,
             ) {
@@ -539,13 +662,57 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     match code {
                         KeyCode::Escape if down => {
-                            if self.build_mode.take().is_some() {
+                            if self.editor.active {
+                                self.editor.active = false;
+                                self.editor.slope_start = None;
+                                self.build_status = None;
+                            } else if self.build_mode.take().is_some() {
                                 if let Some(ui) = &mut self.ui {
                                     ui.set_selected_building(None);
                                 }
                             } else {
                                 event_loop.exit();
                             }
+                        }
+                        KeyCode::KeyT if down => {
+                            self.editor.active = !self.editor.active;
+                            self.editor.slope_start = None;
+                            if self.editor.active {
+                                self.build_mode = None;
+                                if let Some(ui) = &mut self.ui {
+                                    ui.set_selected_building(None);
+                                }
+                                self.build_status = Some(self.editor.status());
+                            } else {
+                                self.build_status = None;
+                            }
+                        }
+                        KeyCode::F1 | KeyCode::F2 | KeyCode::F3 | KeyCode::F4 | KeyCode::F5
+                            if down && self.editor.active =>
+                        {
+                            self.editor.tool = match code {
+                                KeyCode::F1 => TerrainTool::Raise,
+                                KeyCode::F2 => TerrainTool::Lower,
+                                KeyCode::F3 => TerrainTool::Flatten,
+                                KeyCode::F4 => TerrainTool::Smooth,
+                                _ => TerrainTool::Slope,
+                            };
+                            self.editor.slope_start = None;
+                            self.build_status = Some(self.editor.status());
+                        }
+                        KeyCode::BracketLeft | KeyCode::BracketRight
+                            if down && self.editor.active =>
+                        {
+                            let step = if code == KeyCode::BracketLeft { -1 } else { 1 };
+                            self.editor.radius = (self.editor.radius + step)
+                                .clamp(1, core_sim::terrain::MAX_BRUSH_RADIUS);
+                            self.build_status = Some(self.editor.status());
+                        }
+                        KeyCode::Minus | KeyCode::Equal if down && self.editor.active => {
+                            let step = if code == KeyCode::Minus { -250 } else { 250 };
+                            self.editor.strength_mm =
+                                (self.editor.strength_mm + step).clamp(250, 10_000);
+                            self.build_status = Some(self.editor.status());
                         }
                         KeyCode::KeyA | KeyCode::ArrowLeft => self.input.left = down,
                         KeyCode::KeyD | KeyCode::ArrowRight => self.input.right = down,
@@ -577,8 +744,11 @@ impl ApplicationHandler for App {
                         KeyCode::Space if down => {
                             if let Some(selected) = self.world.selected_character() {
                                 let p = self.world.position(selected);
-                                self.camera.target =
-                                    Vec3::new(p.x, height_at(self.world.seed, p.x, p.z), p.z);
+                                self.camera.target = Vec3::new(
+                                    p.x,
+                                    self.world.terrain_edits().height(self.world.seed, p.x, p.z),
+                                    p.z,
+                                );
                             }
                         }
                         KeyCode::KeyR if down => {
@@ -620,7 +790,7 @@ impl ApplicationHandler for App {
                         let dx = (end.0 - start.0) as f32;
                         let dy = (end.1 - start.1) as f32;
                         if dx * dx + dy * dy >= 64.0 {
-                            if self.build_mode.is_none() {
+                            if self.build_mode.is_none() && !self.editor.active {
                                 if let Some(window) = &self.window {
                                     let size = window.inner_size();
                                     let view_proj = self.camera.view_proj();
