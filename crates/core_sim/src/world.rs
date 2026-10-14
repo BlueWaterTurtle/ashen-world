@@ -141,6 +141,8 @@ pub struct World {
     wander_queue: VecDeque<u32>,
     /// Whether each agent is currently in `wander_queue`.
     wander_queued: Vec<bool>,
+    /// Agents held in place by an external system (e.g. working a job); they never wander.
+    held: std::collections::BTreeSet<u32>,
     /// The currently selected player character, if any.
     pub selected_player_character: Option<Entity>,
     /// Simulation LOD configuration.
@@ -227,6 +229,7 @@ impl World {
             pathfinder: Pathfinder::new(),
             wander_queue,
             wander_queued: vec![true; config.agent_count],
+            held: std::collections::BTreeSet::new(),
             selected_player_character,
             lod: config.lod.clone(),
             focus_points: Vec::new(),
@@ -696,6 +699,20 @@ impl World {
         }
     }
 
+    /// Hold (or release) an agent so autonomous wandering skips it. Explicit
+    /// navigation still works. Releasing re-queues the agent for wandering.
+    pub fn set_held(&mut self, e: Entity, held: bool) {
+        if held {
+            self.held.insert(e.0);
+        } else if self.held.remove(&e.0) {
+            self.enqueue_wander(e.0);
+        }
+    }
+
+    pub fn is_held(&self, e: Entity) -> bool {
+        self.held.contains(&e.0)
+    }
+
     fn enqueue_wander(&mut self, i: u32) {
         if let Some(q) = self.wander_queued.get_mut(i as usize) {
             if !*q {
@@ -769,6 +786,7 @@ impl World {
             // Agents that aren't ready are dropped; they re-enter the queue when they
             // become idle again (path finished, pause expired, control released).
             if self.is_player_controlled(e)
+                || self.is_held(e)
                 || self.is_navigating(e)
                 || self.pause_of(e) > 0
                 || r == 0

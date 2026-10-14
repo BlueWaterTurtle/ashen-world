@@ -1,6 +1,9 @@
 use crate::chunk::WorldPos;
 use crate::clock::GameClock;
 use crate::npc::{Inventory, ItemStack};
+use crate::production::MineProduction;
+#[cfg(test)]
+use crate::resource::ResourceKind;
 use crate::terrain::{fertility_at, height_at, resource_richness_at, MAX_STEP_HEIGHT};
 use crate::world::Entity;
 
@@ -44,6 +47,64 @@ pub struct Building {
     pub inputs: SlotInventory,
     pub outputs: SlotInventory,
     pub is_storage: bool,
+    /// Ore production state, present for mines.
+    pub mine: Option<MineProduction>,
+    /// Resources that must be present in `inputs` for the building to run.
+    pub required_inputs: Vec<String>,
+    /// Set by the job system while a worker is at a slot and working.
+    pub worked: bool,
+}
+
+/// Why a building can or cannot currently be worked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkStatus {
+    Ready,
+    OutputFull,
+    MissingInput,
+}
+
+impl Building {
+    /// Whether production could run right now (ignores whether anyone is working it).
+    pub fn work_status(&self) -> WorkStatus {
+        if self
+            .required_inputs
+            .iter()
+            .any(|item| self.inputs.count_of(item) == 0)
+        {
+            return WorkStatus::MissingInput;
+        }
+        let output_full = match &self.mine {
+            Some(mine) => mine.output.is_full(),
+            None => {
+                !self.is_storage
+                    && !self.outputs.allowed_resources.is_empty()
+                    && self
+                        .outputs
+                        .allowed_resources
+                        .iter()
+                        .all(|item| self.outputs.available_for(item) == 0)
+            }
+        };
+        if output_full {
+            WorkStatus::OutputFull
+        } else {
+            WorkStatus::Ready
+        }
+    }
+
+    /// World position where the worker in `slot` stands (just south of the footprint).
+    pub fn worker_slot_position(&self, slot: usize) -> WorldPos {
+        let f = self.footprint;
+        WorldPos::new(
+            f.x as f32 + 0.5 + (slot as i32 % f.width.max(1)) as f32,
+            0.0,
+            (f.z + f.depth) as f32 + 0.5,
+        )
+    }
+
+    pub fn has_free_worker_slot(&self) -> bool {
+        self.workers.iter().any(Option::is_none)
+    }
 }
 
 /// Finite storage where each slot holds one resource type up to `stack_limit`.
@@ -160,6 +221,8 @@ pub struct BuildingLogistics {
     pub input_resources: Vec<String>,
     pub output_resources: Vec<String>,
     pub is_storage: bool,
+    pub is_mine: bool,
+    pub required_inputs: Vec<String>,
 }
 
 impl Default for BuildingLogistics {
@@ -172,6 +235,8 @@ impl Default for BuildingLogistics {
             input_resources: Vec::new(),
             output_resources: Vec::new(),
             is_storage: false,
+            is_mine: false,
+            required_inputs: Vec::new(),
         }
     }
 }
@@ -303,6 +368,9 @@ impl Buildings {
                 logistics.output_resources.clone(),
             ),
             is_storage: logistics.is_storage,
+            mine: logistics.is_mine.then(MineProduction::default),
+            required_inputs: logistics.required_inputs,
+            worked: false,
         });
         Ok(self.buildings.len() - 1)
     }
@@ -528,6 +596,23 @@ impl Buildings {
         Ok(building.outputs.insert(item, count))
     }
 
+    /// Advance production by `dt` seconds. A building is worked while the job
+    /// system has flagged it, a worker holds a slot, and it is ready to run.
+    pub fn tick_production(&mut self, dt: f32) {
+        for building in &mut self.buildings {
+            let Some(mine) = &mut building.mine else {
+                continue;
+            };
+            let worked = building.worked
+                && building.workers.iter().any(Option::is_some)
+                && building
+                    .required_inputs
+                    .iter()
+                    .all(|i| building.inputs.count_of(i) > 0);
+            mine.advance(dt, worked);
+        }
+    }
+
     /// True if a cell is blocked by a building (for pathfinding obstacles).
     pub fn blocks(&self, cell: (i32, i32)) -> bool {
         self.buildings.iter().any(|b| b.footprint.contains(cell))
@@ -679,6 +764,8 @@ mod tests {
                     input_resources: vec!["wheat_seed".into()],
                     output_resources: vec!["wheat".into()],
                     is_storage: false,
+                    is_mine: false,
+                    required_inputs: Vec::new(),
                 },
             )
             .unwrap();
@@ -696,6 +783,8 @@ mod tests {
                     input_resources: vec!["wheat".into()],
                     output_resources: vec!["wheat".into()],
                     is_storage: true,
+                    is_mine: false,
+                    required_inputs: Vec::new(),
                 },
             )
             .unwrap();
@@ -766,5 +855,79 @@ mod tests {
         assert_eq!(crop_progress(&clock, 0, 0, 3.0), 0.0);
         assert!((crop_progress(&clock, 0, day * 3 / 2, 3.0) - 0.5).abs() < 1e-5);
         assert_eq!(crop_progress(&clock, 0, day * 10, 3.0), 1.0);
+    }
+
+    #[test]
+    fn mine_produces_only_while_worked_and_ready() {
+        let mut buildings = Buildings::default();
+        let mine = buildings
+            .place_with_logistics(
+                1,
+                "iron_mine",
+                Footprint {
+                    x: 0,
+                    z: 0,
+                    width: 1,
+                    depth: 1,
+                },
+                &PlacementRules::default(),
+                BuildingLogistics {
+                    worker_slots: 1,
+                    is_mine: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let count = |b: &Buildings| b.buildings[mine].mine.as_ref().unwrap().output.count;
+        buildings.buildings[mine].worked = true;
+        buildings.tick_production(2.0);
+        assert_eq!(count(&buildings), 0, "no worker assigned");
+        buildings.assign_worker(mine, Entity(1)).unwrap();
+        buildings.buildings[mine].worked = false;
+        buildings.tick_production(2.0);
+        assert_eq!(count(&buildings), 0, "not worked");
+        buildings.buildings[mine].worked = true;
+        buildings.tick_production(2.0);
+        assert_eq!(count(&buildings), 1);
+    }
+
+    #[test]
+    fn work_status_reports_missing_input_and_full_output() {
+        let mut buildings = Buildings::default();
+        let fp = Footprint {
+            x: 0,
+            z: 0,
+            width: 2,
+            depth: 2,
+        };
+        let i = buildings
+            .place_with_logistics(
+                1,
+                "mine",
+                fp,
+                &PlacementRules::default(),
+                BuildingLogistics {
+                    worker_slots: 1,
+                    input_slots: 1,
+                    input_resources: vec!["tools".into()],
+                    required_inputs: vec!["tools".into()],
+                    is_mine: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            buildings.buildings[i].work_status(),
+            WorkStatus::MissingInput
+        );
+        buildings.buildings[i].inputs.insert_resource("tools", 1);
+        assert_eq!(buildings.buildings[i].work_status(), WorkStatus::Ready);
+        let cap = ResourceKind::IronOre.stack_size();
+        buildings.buildings[i].mine.as_mut().unwrap().output.count = cap;
+        assert_eq!(buildings.buildings[i].work_status(), WorkStatus::OutputFull);
+        let pos = buildings.buildings[i].worker_slot_position(0);
+        assert!(!buildings.buildings[i]
+            .footprint
+            .contains((pos.x.floor() as i32, pos.z.floor() as i32)));
     }
 }

@@ -99,12 +99,18 @@ pub struct BuildingDef {
     /// Resource types accepted by production inputs or storage.
     #[serde(default)]
     pub input_resources: Vec<String>,
+    /// Resources that must be in the input slots for production to run.
+    #[serde(default)]
+    pub required_inputs: Vec<String>,
     /// Resource types this building can produce or hold for dispatch.
     #[serde(default)]
     pub output_resources: Vec<String>,
     /// Whether this building accepts output transfers from other buildings.
     #[serde(default)]
     pub storage: bool,
+    /// Whether this building mines ore into its output slot while worked.
+    #[serde(default)]
+    pub mine: bool,
     /// Whether residents can live here.
     #[serde(default)]
     pub dwelling: bool,
@@ -278,6 +284,20 @@ pub fn load_content(dir: impl AsRef<Path>) -> Result<Content, ContentError> {
             return Err(invalid(
                 &bdp,
                 format!("building '{}' has incompatible logistics slots", b.id),
+            ));
+        }
+        let is_production = !b.output_resources.is_empty() && !b.storage;
+        if (is_production && b.worker_slots == 0)
+            || b.required_inputs
+                .iter()
+                .any(|item| !b.input_resources.contains(item))
+        {
+            return Err(invalid(
+                &bdp,
+                format!(
+                    "building '{}' needs a worker slot and required inputs must be accepted inputs",
+                    b.id
+                ),
             ));
         }
         if let Some(c) = &b.crop {

@@ -1,5 +1,6 @@
 use core_sim::{
-    fertility_at, height_at, resource_richness_at, Buildings, Entity, World, RECRUIT_MAX_DISTANCE,
+    fertility_at, height_at, resource_richness_at, Buildings, Entity, Job, JobStatus, Jobs,
+    WorkStatus, World, RECRUIT_MAX_DISTANCE,
 };
 use egui::{ClippedPrimitive, Color32, Id, LayerId, Order, Pos2, Stroke, TexturesDelta};
 use glam::{Mat4, Vec3};
@@ -13,12 +14,18 @@ pub enum UiAction {
     Recruit(Entity),
     SelectBuilding(String),
     CancelBuilding,
+    AddJob { worker: Entity, building: usize },
+    RemoveJob { worker: Entity, index: usize },
+    MoveJobUp { worker: Entity, index: usize },
+    MoveJobDown { worker: Entity, index: usize },
+    ResumeJobs(Entity),
 }
 
 pub struct HudData<'a> {
     pub world: &'a World,
     pub selected_entities: &'a [Entity],
     pub buildings: &'a Buildings,
+    pub jobs: &'a Jobs,
     pub building_defs: &'a [content::BuildingDef],
     pub build_status: Option<&'a str>,
     pub seed: u64,
@@ -66,6 +73,7 @@ impl GameUi {
             world,
             selected_entities,
             buildings,
+            jobs,
             building_defs,
             build_status,
             seed,
@@ -189,6 +197,9 @@ impl GameUi {
                         ui.add_space(8.0);
                         ui.label("Move order");
                         ui.small("Left-click open terrain to move this survivor.");
+
+                        ui.separator();
+                        job_panel(ui, selected, jobs, buildings, building_defs, &mut actions);
                     } else {
                         ui.label("No character selected");
                     }
@@ -458,5 +469,97 @@ impl SiteQualityOverlay<'_> {
                 }
             }
         }
+    }
+}
+
+fn building_label(buildings: &Buildings, defs: &[content::BuildingDef], index: usize) -> String {
+    let Some(building) = buildings.buildings.get(index) else {
+        return format!("#{index} (removed)");
+    };
+    let name = defs
+        .iter()
+        .find(|definition| definition.id == building.def)
+        .map_or(building.def.as_str(), |definition| definition.name.as_str());
+    format!("{name} #{index}")
+}
+
+fn status_text(status: JobStatus) -> &'static str {
+    match status {
+        JobStatus::Working => "working",
+        JobStatus::Moving => "moving to slot",
+        JobStatus::Blocked(WorkStatus::OutputFull) => "blocked: output full",
+        JobStatus::Blocked(WorkStatus::MissingInput) => "blocked: missing input",
+        JobStatus::Blocked(WorkStatus::Ready) => "ready",
+        JobStatus::NoFreeSlot => "no free worker slot",
+        JobStatus::Queued => "waiting (higher priority first)",
+        JobStatus::Suspended => "suspended",
+        JobStatus::Invalid => "building missing",
+    }
+}
+
+/// Job panel: the worker's prioritized jobs (top = highest priority).
+fn job_panel(
+    ui: &mut egui::Ui,
+    worker: Entity,
+    jobs: &Jobs,
+    buildings: &Buildings,
+    defs: &[content::BuildingDef],
+    actions: &mut Vec<UiAction>,
+) {
+    ui.heading("Jobs");
+    let list = jobs.jobs(worker);
+    if list.is_empty() {
+        ui.small("No jobs. Add a building below.");
+    }
+    if jobs.is_suspended(worker) {
+        ui.small("Jobs suspended by a move order.");
+        if ui.small_button("Resume jobs").clicked() {
+            actions.push(UiAction::ResumeJobs(worker));
+        }
+    }
+    for (index, job) in list.iter().enumerate() {
+        let Job::Work { building } = *job;
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "{}. {}",
+                index + 1,
+                building_label(buildings, defs, building)
+            ));
+            if let Some(status) = jobs.job_status(worker, index, buildings) {
+                ui.small(status_text(status));
+            }
+            if ui.small_button("▲").clicked() {
+                actions.push(UiAction::MoveJobUp { worker, index });
+            }
+            if ui.small_button("▼").clicked() {
+                actions.push(UiAction::MoveJobDown { worker, index });
+            }
+            if ui.small_button("✕").clicked() {
+                actions.push(UiAction::RemoveJob { worker, index });
+            }
+        });
+    }
+    let candidates: Vec<usize> = (0..buildings.buildings.len())
+        .filter(|&i| {
+            let b = &buildings.buildings[i];
+            !b.workers.is_empty() && !list.contains(&Job::Work { building: i })
+        })
+        .collect();
+    if !candidates.is_empty() {
+        egui::ComboBox::from_id_salt("add_job")
+            .selected_text("Add job…")
+            .show_ui(ui, |ui| {
+                for i in candidates {
+                    if ui
+                        .selectable_label(false, building_label(buildings, defs, i))
+                        .clicked()
+                    {
+                        actions.push(UiAction::AddJob {
+                            worker,
+                            building: i,
+                        });
+                    }
+                }
+            });
     }
 }
