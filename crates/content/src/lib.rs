@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub mod cache;
+pub mod registry;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Faction {
     pub id: String,
