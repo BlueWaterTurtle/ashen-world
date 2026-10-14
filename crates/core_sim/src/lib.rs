@@ -4,6 +4,7 @@ pub mod behavior;
 pub mod building;
 pub mod chunk;
 pub mod clock;
+pub mod job;
 pub mod npc;
 pub mod path;
 pub mod production;
@@ -16,9 +17,11 @@ pub use behavior::Behavior;
 pub use building::{
     average_fertility, average_resource_richness, crop_progress, Building, BuildingLogistics,
     Buildings, Footprint, LogisticsError, PlaceError, PlacementRules, ResourceNode, SlotInventory,
+    WorkStatus,
 };
 pub use chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
 pub use clock::GameClock;
+pub use job::{Job, JobStatus, Jobs, WorkerActivity, JOB_CHECK_INTERVAL_TICKS};
 pub use npc::{
     DespawnError, EntityKind, Inventory, ItemStack, LodConfig, NavGoal, NpcId, PersistentNpcRecord,
     SimTier, SimulationTier, Skills,

@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use camera::Camera;
 use core_sim::{
-    height_at, Behavior, BuildingLogistics, Buildings, Footprint, PlacementRules, World,
-    WorldConfig, WorldPos, TICK_DT,
+    height_at, Behavior, BuildingLogistics, Buildings, Footprint, Job, Jobs, PlacementRules,
+    WorkerActivity, World, WorldConfig, WorldPos, TICK_DT,
 };
 use glam::{Mat4, Vec3, Vec4};
 use renderer::{AgentInstance, Renderer};
@@ -113,6 +113,7 @@ struct App {
     world: World,
     selected_entities: Vec<core_sim::Entity>,
     buildings: Buildings,
+    jobs: Jobs,
     building_defs: Vec<content::BuildingDef>,
     build_mode: Option<String>,
     build_status: Option<String>,
@@ -135,6 +136,7 @@ impl App {
             world,
             selected_entities,
             buildings: Buildings::default(),
+            jobs: Jobs::new(),
             building_defs,
             build_mode: None,
             build_status: None,
@@ -202,6 +204,7 @@ impl App {
                 output_resources: definition.output_resources.clone(),
                 is_storage: definition.storage,
                 is_mine: definition.mine,
+                required_inputs: definition.required_inputs.clone(),
             };
             match self.buildings.place_with_logistics(
                 self.world.seed,
@@ -258,7 +261,9 @@ impl App {
                 let position = self.world.position(entity);
                 let offset_x = position.x - anchor_position.x;
                 let offset_z = position.z - anchor_position.z;
-                let _ = self.world.command_move(
+                let _ = self.jobs.player_move(
+                    &mut self.world,
+                    &mut self.buildings,
                     entity,
                     WorldPos::new(ground.x + offset_x, 0.0, ground.z + offset_z),
                 );
@@ -277,6 +282,7 @@ impl App {
                     world: &self.world,
                     selected_entities: &self.selected_entities,
                     buildings: &self.buildings,
+                    jobs: &self.jobs,
                     building_defs: &self.building_defs,
                     build_status: self.build_status.as_deref(),
                     seed: self.world.seed,
@@ -307,6 +313,16 @@ impl App {
                         ui.set_selected_building(Some(id));
                     }
                 }
+                UiAction::AddJob { worker, building } => {
+                    self.jobs.add_job(worker, Job::Work { building });
+                }
+                UiAction::RemoveJob { worker, index } => {
+                    self.jobs
+                        .remove_job(worker, index, &mut self.buildings, &mut self.world);
+                }
+                UiAction::MoveJobUp { worker, index } => self.jobs.move_up(worker, index),
+                UiAction::MoveJobDown { worker, index } => self.jobs.move_down(worker, index),
+                UiAction::ResumeJobs(worker) => self.jobs.resume(worker),
                 UiAction::CancelBuilding => {
                     self.build_mode = None;
                     self.build_status = None;
@@ -323,6 +339,8 @@ impl App {
         self.accumulator += dt.as_secs_f32();
         while self.accumulator >= TICK_DT {
             self.world.step();
+            self.jobs.update(&mut self.world, &mut self.buildings);
+            self.buildings.tick_production(TICK_DT);
             self.accumulator -= TICK_DT;
             self.stats.ticks += 1;
         }
@@ -361,8 +379,14 @@ impl App {
                     } else {
                         [1.0; 4]
                     };
+                    // Placeholder work animation: a small vertical bob while working.
+                    let bob = if self.jobs.activity(e) == WorkerActivity::Working {
+                        0.15 * (self.world.tick as f32 * 0.3).sin().abs()
+                    } else {
+                        0.0
+                    };
                     self.agent_instances.push(AgentInstance {
-                        pos: [position.x, position.y, position.z, 0.0],
+                        pos: [position.x, position.y + bob, position.z, 0.0],
                         color: c,
                     });
                 }
