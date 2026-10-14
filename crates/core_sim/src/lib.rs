@@ -31,7 +31,8 @@ pub use production::{MineProduction, OutputSlot, ORE_SECONDS_PER_UNIT};
 pub use resource::{ResourceDef, ResourceKind, DEFAULT_STACK_SIZE, ORE_STACK_SIZE};
 pub use rng::Rng;
 pub use terrain::{
-    fertility_at, height_at, is_walkable, resource_richness_at, ChunkStreamer, ChunkTerrain,
+    fertility_at, height_at, is_walkable, is_walkable_with, resource_richness_at, ChunkStreamer,
+    ChunkTerrain, TerrainEdit, TerrainEdits,
 };
 pub use world::{
     ControlError, Entity, PlayerControlled, RecruitError, Recruitable, World, WorldConfig,

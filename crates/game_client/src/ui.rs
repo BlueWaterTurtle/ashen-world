@@ -1,6 +1,6 @@
 use core_sim::{
-    fertility_at, height_at, resource_richness_at, Buildings, Entity, Job, JobStatus, Jobs,
-    WorkStatus, World, RECRUIT_MAX_DISTANCE,
+    fertility_at, resource_richness_at, Buildings, Entity, Job, JobStatus, Jobs, WorkStatus, World,
+    RECRUIT_MAX_DISTANCE,
 };
 use egui::{ClippedPrimitive, Color32, Id, LayerId, Order, Pos2, Stroke, TexturesDelta};
 use glam::{Mat4, Vec3};
@@ -116,6 +116,7 @@ impl GameUi {
                         center: (camera.target.x, camera.target.z),
                         radius: camera.distance * 0.8,
                         seed,
+                        edits: world.terrain_edits(),
                         definition,
                         screen_size: (screen_width, screen_height),
                     }
@@ -135,7 +136,7 @@ impl GameUi {
                     .map(|(x, z)| {
                         let position = Vec3::new(
                             x as f32,
-                            height_at(seed, x as f32, z as f32) + 0.3,
+                            world.terrain_edits().height(seed, x as f32, z as f32) + 0.3,
                             z as f32,
                         );
                         project_to_screen(view_proj, position, screen_width, screen_height)
@@ -413,6 +414,7 @@ struct SiteQualityOverlay<'a> {
     center: (f32, f32),
     radius: f32,
     seed: u64,
+    edits: &'a core_sim::TerrainEdits,
     definition: &'a content::BuildingDef,
     screen_size: (f32, f32),
 }
@@ -452,7 +454,7 @@ impl SiteQualityOverlay<'_> {
                     .map(|(cx, cz)| {
                         let position = Vec3::new(
                             cx as f32,
-                            height_at(self.seed, cx as f32, cz as f32) + 0.12,
+                            self.edits.height(self.seed, cx as f32, cz as f32) + 0.12,
                             cz as f32,
                         );
                         project_to_screen(

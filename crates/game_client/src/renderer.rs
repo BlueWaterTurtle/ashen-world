@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use core_sim::{Building, ChunkCoord, Footprint};
+use core_sim::{Building, ChunkCoord, Footprint, TerrainEdits};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
@@ -104,6 +104,7 @@ pub struct Renderer {
     seed: u64,
     model_dir: PathBuf,
     chunks: HashMap<ChunkCoord, GpuMesh>,
+    chunk_revisions: HashMap<ChunkCoord, u64>,
     agent_mesh: GpuMesh,
     agent_surfaces: Vec<asset_pipeline::Surface>,
     agent_materials: Vec<GpuMaterial>,
@@ -417,6 +418,7 @@ impl Renderer {
             seed,
             model_dir,
             chunks: HashMap::new(),
+            chunk_revisions: HashMap::new(),
             agent_mesh,
             agent_surfaces,
             agent_materials,
@@ -505,19 +507,26 @@ impl Renderer {
 
     /// Keep terrain meshes loaded for chunks within `radius` of `center`: build a bounded
     /// number of missing ones (nearest first) and drop those that are out of range.
-    pub fn update_chunks(&mut self, center: ChunkCoord, radius: i32) {
+    /// Chunks whose terrain edit revision changed are rebuilt through the same budget.
+    pub fn update_chunks(&mut self, center: ChunkCoord, radius: i32, edits: &TerrainEdits) {
         self.chunks.retain(|c, _| {
             (c.x - center.x).abs() <= radius + 1 && (c.z - center.z).abs() <= radius + 1
         });
+        self.chunk_revisions
+            .retain(|c, _| self.chunks.contains_key(c));
         let mut missing: Vec<ChunkCoord> = (center.z - radius..=center.z + radius)
             .flat_map(|z| {
                 (center.x - radius..=center.x + radius).map(move |x| ChunkCoord::new(x, z))
             })
-            .filter(|c| !self.chunks.contains_key(c))
+            .filter(|c| {
+                !self.chunks.contains_key(c)
+                    || self.chunk_revisions.get(c) != Some(&edits.revision(*c))
+            })
             .collect();
         missing.sort_by_key(|c| (c.x - center.x).pow(2) + (c.z - center.z).pow(2));
         for c in missing.into_iter().take(CHUNK_BUILDS_PER_FRAME) {
-            let (v, i) = terrain_chunk_mesh(self.seed, c);
+            let (v, i) = terrain_chunk_mesh(self.seed, edits, c);
+            self.chunk_revisions.insert(c, edits.revision(c));
             self.chunks
                 .insert(c, GpuMesh::new(&self.device, "terrain chunk", &v, &i));
         }
@@ -528,6 +537,7 @@ impl Renderer {
         camera: &Camera,
         agents: &[AgentInstance],
         buildings: &[Building],
+        edits: &TerrainEdits,
         ui: &mut GameUi,
         pixels_per_point: f32,
     ) -> Result<(), wgpu::SurfaceError> {
@@ -592,7 +602,7 @@ impl Renderer {
             }
             let x = building.footprint.x as f32;
             let z = building.footprint.z as f32;
-            let y = core_sim::height_at(
+            let y = edits.height(
                 self.seed,
                 x + building.footprint.width as f32 * 0.5,
                 z + building.footprint.depth as f32 * 0.5,

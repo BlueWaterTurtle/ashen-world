@@ -289,6 +289,7 @@ mod tests {
             buildings
                 .place_with_logistics(
                     world.seed,
+                    world.terrain_edits(),
                     "mine",
                     Footprint {
                         x,
