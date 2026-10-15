@@ -1,4 +1,5 @@
 mod assets;
+mod bootstrap;
 mod camera;
 mod mesh;
 mod renderer;
@@ -9,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use camera::Camera;
 use core_sim::{
-    Behavior, BuildingLogistics, Buildings, Footprint, Job, Jobs, PlacementRules, Schedule,
-    TerrainEdit, WorkerActivity, World, WorldConfig, WorldPos, TICK_DT,
+    BuildingLogistics, Buildings, Footprint, Job, Jobs, PlacementRules, Schedule, TerrainEdit,
+    WorkerActivity, World, WorldPos, TICK_DT,
 };
 use glam::{Mat4, Vec3, Vec4};
 use renderer::{AgentInstance, Renderer};
@@ -857,97 +858,14 @@ impl ApplicationHandler for App {
     }
 }
 
-/// One sim behaviour per unit archetype: the archetype's behaviour definition, with
-/// its speed scaled from the archetype's `move_speed` and recruitability mapped from archetype.
-fn behaviors_from_content(c: &content::Content) -> Vec<Behavior> {
-    let behaviors: Vec<Behavior> = c
-        .units
-        .iter()
-        .filter_map(|u| {
-            let b = c.behaviors.iter().find(|b| b.id == u.behavior)?;
-            Some(
-                Behavior::from_seconds(
-                    b.wander_range,
-                    b.pause_seconds_min,
-                    b.pause_seconds_max,
-                    u.move_speed * b.speed_multiplier,
-                )
-                .with_recruitable(u.recruitable),
-            )
-        })
-        .collect();
-    if behaviors.is_empty() {
-        vec![Behavior::default()]
-    } else {
-        behaviors
-    }
-}
-
-fn apply_world_overrides(config: &mut WorldConfig, o: &content::WorldOverrides) {
-    if let Some(v) = o.seed {
-        config.seed = v;
-    }
-    if let Some(v) = o.agent_count {
-        config.agent_count = v;
-    }
-    if let Some(v) = o.chunk_radius {
-        config.chunk_radius = v;
-    }
-    if let Some(v) = o.max_path_requests_per_tick {
-        config.max_path_requests_per_tick = v;
-    }
-    if let Some(v) = o.starting_player_characters {
-        config.starting_player_characters = v;
-    }
-}
-
 fn main() {
-    let content_dir = assets::root().join("content");
-    let scenarios_dir = assets::root().join("scenarios");
-    let selector = std::env::var("ASHEN_SCENARIO").unwrap_or_else(|_| "default".to_string());
-    let (scenario, scenario_err) = content::Scenario::load_or_default(
-        content::Scenario::resolve_path(&scenarios_dir, &selector),
+    let startup = bootstrap::bootstrap(
+        &assets::root(),
+        std::env::var("ASHEN_SCENARIO").ok().as_deref(),
     );
-    if let Some(e) = scenario_err {
-        eprintln!("scenario: {e}; using built-in default scenario");
-    }
-    println!("scenario: {}", scenario.name);
-    let (manifest, manifest_err) = scenario.resolve_manifest(&content_dir);
-    if let Some(e) = manifest_err {
-        eprintln!("manifest: {e}; using default composition");
-    }
-    let (schedule, unknown) = Schedule::from_names_or_standard(&manifest.systems);
-    for name in unknown {
-        eprintln!("manifest: unknown system '{name}' ignored");
-    }
-    println!("systems: {}", schedule.system_names().join(", "));
-    let (config, building_defs) = match content::load_content_with(&content_dir, &manifest) {
-        Ok(c) => {
-            println!(
-                "content: {} factions, {} units, {} biomes, {} races, {} behaviors, {} buildings, {} crops",
-                c.factions.len(),
-                c.units.len(),
-                c.biomes.len(),
-                c.races.len(),
-                c.behaviors.len(),
-                c.buildings.len(),
-                c.crops.len()
-            );
-            (
-                WorldConfig {
-                    behaviors: behaviors_from_content(&c),
-                    ..WorldConfig::default()
-                },
-                c.buildings,
-            )
-        }
-        Err(e) => {
-            eprintln!("content load failed: {e}");
-            (WorldConfig::default(), Vec::new())
-        }
-    };
-    let mut config = config;
-    apply_world_overrides(&mut config, &scenario.world);
+    println!("{}", startup.summary);
+    let (config, building_defs, schedule) =
+        (startup.config, startup.building_defs, startup.schedule);
     let world = World::generate(&config);
     let event_loop = match EventLoop::new() {
         Ok(l) => l,
@@ -966,23 +884,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn world_overrides_apply_and_default_is_noop() {
-        let mut c = WorldConfig::default();
-        apply_world_overrides(&mut c, &content::WorldOverrides::default());
-        assert_eq!(c, WorldConfig::default());
-        apply_world_overrides(
-            &mut c,
-            &content::WorldOverrides {
-                seed: Some(9),
-                agent_count: Some(3),
-                ..Default::default()
-            },
-        );
-        assert_eq!((c.seed, c.agent_count), (9, 3));
-        assert_eq!(c.chunk_radius, WorldConfig::default().chunk_radius);
-    }
+    use core_sim::WorldConfig;
 
     #[test]
     fn agent_frustum_culling_keeps_visible_and_discards_distant_agents() {

@@ -127,6 +127,15 @@ pub fn load_content_with(
     dir: impl AsRef<Path>,
     manifest: &Manifest,
 ) -> Result<Content, ContentError> {
+    load_content_with_warnings(dir, manifest).map(|(c, _)| c)
+}
+
+/// Like [`load_content_with`], also returning a warning for every reference into a disabled
+/// domain (skipped, never an error).
+pub fn load_content_with_warnings(
+    dir: impl AsRef<Path>,
+    manifest: &Manifest,
+) -> Result<(Content, Vec<String>), ContentError> {
     let dir = dir.as_ref();
     let mut c = Content::default();
     let mut unchecked: Vec<&'static str> = Vec::new();
@@ -166,7 +175,9 @@ pub fn load_content_with(
     }
     check_refs(&ids, &c.buildings, &buildings_path)?;
     check_refs(&ids, &c.units, &units_path)?;
-    Ok(c)
+    let mut warnings = ids.disabled_references(&c.buildings);
+    warnings.extend(ids.disabled_references(&c.units));
+    Ok((c, warnings))
 }
 
 #[cfg(test)]
@@ -288,6 +299,27 @@ mod tests {
         let c = load_content_with(assets_dir(), &m).unwrap();
         assert!(!c.factions.is_empty() && !c.races.is_empty());
         assert!(c.units.is_empty() && c.buildings.is_empty() && c.crops.is_empty());
+    }
+
+    #[test]
+    fn disabled_domain_references_warn_but_load() {
+        let m = Manifest {
+            content_domains: vec!["units".into(), "buildings".into()],
+            systems: vec![],
+        };
+        let (c, warnings) = load_content_with_warnings(assets_dir(), &m).unwrap();
+        assert!(!c.units.is_empty());
+        assert!(warnings.iter().any(|w| w.contains("disabled domain")));
+        assert!(
+            warnings.iter().any(|w| w.starts_with("unit ")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn full_manifest_has_no_warnings() {
+        let (_, w) = load_content_with_warnings(assets_dir(), &Manifest::default()).unwrap();
+        assert!(w.is_empty());
     }
 
     #[test]

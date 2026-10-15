@@ -68,18 +68,27 @@ impl Scenario {
         }
     }
 
+    /// Path of the manifest file this scenario selects (`manifest.ron` when unset).
+    pub fn manifest_path(&self, content_dir: &Path) -> std::path::PathBuf {
+        content_dir.join(self.manifest.as_deref().unwrap_or("manifest.ron"))
+    }
+
+    /// Apply inline `content_domains`/`systems`, which replace (not merge with) the manifest's lists.
+    pub fn apply_overrides(&self, mut manifest: Manifest) -> Manifest {
+        if let Some(d) = &self.content_domains {
+            manifest.content_domains = d.clone();
+        }
+        if let Some(s) = &self.systems {
+            manifest.systems = s.clone();
+        }
+        manifest
+    }
+
     /// Build the effective manifest: the scenario's (or default) manifest file, then inline
     /// overrides. A missing/invalid manifest falls back to the default; the error is returned.
     pub fn resolve_manifest(&self, content_dir: &Path) -> (Manifest, Option<ContentError>) {
-        let file = self.manifest.as_deref().unwrap_or("manifest.ron");
-        let (mut m, err) = Manifest::load_or_default(content_dir.join(file));
-        if let Some(d) = &self.content_domains {
-            m.content_domains = d.clone();
-        }
-        if let Some(s) = &self.systems {
-            m.systems = s.clone();
-        }
-        (m, err)
+        let (m, err) = Manifest::load_or_default(self.manifest_path(content_dir));
+        (self.apply_overrides(m), err)
     }
 }
 
@@ -116,6 +125,19 @@ mod tests {
                 .unwrap();
         let (m, _) = s.resolve_manifest(&assets().join("content"));
         assert_eq!(m.content_domains, vec!["factions".to_string()]);
+    }
+
+    #[test]
+    fn resolution_steps_are_independent() {
+        let content = Path::new("c");
+        let mut s = Scenario::default();
+        assert_eq!(s.manifest_path(content), content.join("manifest.ron"));
+        s.manifest = Some("m.ron".into());
+        assert_eq!(s.manifest_path(content), content.join("m.ron"));
+        s.systems = Some(vec!["x".into()]);
+        let m = s.apply_overrides(Manifest::default());
+        assert_eq!(m.systems, vec!["x".to_string()]);
+        assert_eq!(m.content_domains, Manifest::default().content_domains);
     }
 
     #[test]

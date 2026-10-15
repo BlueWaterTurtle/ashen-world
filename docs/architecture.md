@@ -67,6 +67,18 @@ composition as above; `world` overrides are then applied to `WorldConfig`. If th
 missing or invalid a warning is printed and the built-in default (no overrides) is used, so the
 default scenario reproduces the original behavior. Example: `ASHEN_SCENARIO=small_world`.
 
+## Startup resolution order
+
+Composition lives in `game_client::bootstrap` (no winit/wgpu) and runs in this order:
+
+1. **Scenario selected** – `ASHEN_SCENARIO` (name or path, default `default`). Missing/invalid file: built-in default scenario.
+2. **Manifest resolved** – the scenario's `manifest` (else `manifest.ron`), then inline `content_domains`/`systems` replace the manifest's lists. Missing/invalid manifest: default manifest.
+3. **Content loaded** – only enabled domains. Failure: default `WorldConfig` and no building defs. References into disabled domains are skipped and reported as warnings.
+4. **Schedule built** – from manifest systems. Unknown names are ignored; an empty result uses the standard schedule.
+5. **World overrides applied** – scenario `world` values on top of the config (also after a content fallback).
+
+A structured `StartupSummary` printed at boot lists scenario (requested vs fallback), manifest, domains, systems, any fallbacks and warnings.
+
 ## Adding a content domain
 
 1. Add `crates/content/src/domains/<name>.rs` with the type and a `ContentDomain` impl
