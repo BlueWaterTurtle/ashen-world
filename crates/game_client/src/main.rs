@@ -364,6 +364,19 @@ impl App {
         if let Some(renderer) = &self.renderer {
             self.camera.aspect = renderer.aspect();
         }
+        self.run_hud();
+
+        let now = Instant::now();
+        let dt = (now - self.last).min(MAX_FRAME);
+        self.last = now;
+        self.step_simulation(dt);
+        self.update_camera(dt);
+        self.render_scene();
+        self.report_stats(now);
+    }
+
+    /// Run the HUD and apply any actions the player triggered through it.
+    fn run_hud(&mut self) {
         let actions = match (&self.window, &mut self.ui) {
             (Some(window), Some(ui)) => ui.run(
                 window,
@@ -384,10 +397,10 @@ impl App {
         for action in actions {
             self.apply_ui_action(action);
         }
+    }
 
-        let now = Instant::now();
-        let dt = (now - self.last).min(MAX_FRAME);
-        self.last = now;
+    /// Advance the fixed-step simulation by as many ticks as `dt` allows.
+    fn step_simulation(&mut self, dt: Duration) {
         self.accumulator += dt.as_secs_f32();
         while self.accumulator >= TICK_DT {
             self.schedule.run(&mut self.world);
@@ -396,7 +409,10 @@ impl App {
             self.accumulator -= TICK_DT;
             self.stats.ticks += 1;
         }
+    }
 
+    /// Apply keyboard panning, keep the camera on the terrain, and publish it as the LOD focus.
+    fn update_camera(&mut self, dt: Duration) {
         let axis = |pos: bool, neg: bool| f32::from(pos) - f32::from(neg);
         let speed = self.camera.distance * 0.9 * dt.as_secs_f32();
         self.camera.pan(
@@ -413,7 +429,9 @@ impl App {
             0.0,
             self.camera.target.z,
         )]);
+    }
 
+    fn render_scene(&mut self) {
         if let (Some(r), Some(ui)) = (&mut self.renderer, &mut self.ui) {
             self.camera.aspect = r.aspect();
             let t = self.camera.target;
@@ -469,7 +487,10 @@ impl App {
                 Err(e) => eprintln!("render error: {e}"),
             }
         }
+    }
 
+    /// Count the frame and, once a second, print and show frame/sim statistics.
+    fn report_stats(&mut self, now: Instant) {
         self.stats.frames += 1;
         let elapsed = now - self.stats.window_start;
         if elapsed >= Duration::from_secs(1) {
