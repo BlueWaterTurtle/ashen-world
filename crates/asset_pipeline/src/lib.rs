@@ -195,7 +195,7 @@ pub fn load_prefab(
     let definition_path = definition_path.as_ref();
     let definition_text = fs::read_to_string(definition_path)
         .map_err(|error| format!("{}: {error}", definition_path.display()))?;
-    let definition: PrefabDefinition = serde_json::from_str(&definition_text)
+    let definition: PrefabDefinition = ron::from_str(&definition_text)
         .map_err(|error| format!("{}: {error}", definition_path.display()))?;
     if definition.parts.is_empty() {
         return Err(format!(
@@ -743,7 +743,7 @@ mod tests {
             ("iron_mine", [4.0, 4.0]),
         ];
         for (name, footprint) in footprints {
-            let recipe = asset_root.join(format!("prefabs/buildings/{name}.json"));
+            let recipe = asset_root.join(format!("prefabs/buildings/{name}.ron"));
             let model = load_prefab(&asset_root, recipe)
                 .unwrap_or_else(|error| panic!("could not compose {name}: {error}"));
             assert!(!model.vertices.is_empty(), "{name} has no vertices");
