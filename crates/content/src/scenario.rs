@@ -27,6 +27,8 @@ pub struct Scenario {
     /// Inline overrides applied on top of the manifest.
     pub content_domains: Option<Vec<String>>,
     pub systems: Option<Vec<String>>,
+    /// Enabled mod ids; replaces the manifest's `mods`. `None` keeps the manifest's (default none).
+    pub mods: Option<Vec<String>>,
     pub world: WorldOverrides,
 }
 
@@ -80,6 +82,9 @@ impl Scenario {
         }
         if let Some(s) = &self.systems {
             manifest.systems = s.clone();
+        }
+        if let Some(m) = &self.mods {
+            manifest.mods = m.clone();
         }
         manifest
     }

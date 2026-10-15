@@ -1,0 +1,9 @@
+[
+    (
+        id: "barley",
+        name: "Barley",
+        growth_days: 4.0,
+        yield_amount: 15.0,
+        yield_resource: "wheat",
+    ),
+]
