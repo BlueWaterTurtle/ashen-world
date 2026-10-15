@@ -146,18 +146,10 @@ impl App {
                 return;
             }
         };
-        let differences = envelope.metadata.differences(&self.save_metadata);
-        if !differences.is_empty() {
-            self.build_status = Some(format!(
-                "Load failed: save composition is incompatible: {}",
-                differences.join("; ")
-            ));
-            return;
-        }
-        let world = match World::from_snapshot(envelope.world) {
-            Ok(world) => world,
+        let (world, buildings, jobs) = match envelope.restore(&self.save_metadata) {
+            Ok(state) => state,
             Err(error) => {
-                self.build_status = Some(format!("Load failed: invalid world snapshot: {error}"));
+                self.build_status = Some(format!("Load failed: {error}"));
                 return;
             }
         };
@@ -165,8 +157,8 @@ impl App {
             self.camera.target = Vec3::new(point.x, point.y, point.z);
         }
         self.world = world;
-        self.buildings = envelope.buildings;
-        self.jobs = envelope.jobs;
+        self.buildings = buildings;
+        self.jobs = jobs;
         self.selected_entities = self.world.selected_character().into_iter().collect();
         self.accumulator = 0.0;
         self.build_status = Some(format!("Loaded from {QUICK_SAVE_PATH}."));
