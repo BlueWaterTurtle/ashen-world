@@ -426,4 +426,133 @@ mod tests {
         assert_eq!(buildings2.buildings, buildings.buildings);
         assert!(buildings.buildings[shop].inputs.count_of("iron_ore") > 0);
     }
+
+    /// Stocked wood store, a requested 15-wood site, and one builder with a Build job.
+    fn construction_state() -> (World, Buildings, Jobs, usize, usize) {
+        use core_sim::ResourceKind;
+        let world = World::generate(&WorldConfig {
+            agent_count: 2,
+            ..Default::default()
+        });
+        let mut buildings = Buildings::default();
+        let store = buildings
+            .place_with_logistics(
+                world.seed,
+                world.terrain_edits(),
+                "wood_storage",
+                Footprint {
+                    x: 0,
+                    z: 0,
+                    width: 2,
+                    depth: 2,
+                },
+                &PlacementRules::default(),
+                BuildingLogistics {
+                    input_slots: 1,
+                    output_slots: 1,
+                    is_storage: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        buildings.buildings[store]
+            .outputs
+            .insert_resource("wood", 30);
+        let site = buildings
+            .request_construction(
+                world.seed,
+                world.terrain_edits(),
+                "ore_storage",
+                Footprint {
+                    x: 10,
+                    z: 0,
+                    width: 2,
+                    depth: 2,
+                },
+                &PlacementRules::default(),
+                BuildingLogistics {
+                    input_slots: 1,
+                    output_slots: 1,
+                    is_storage: true,
+                    ..Default::default()
+                },
+                ResourceKind::Wood,
+                15,
+            )
+            .unwrap();
+        let mut jobs = Jobs::default();
+        jobs.add_job(Entity(0), Job::Build { site, from: store });
+        (world, buildings, jobs, store, site)
+    }
+
+    fn construction_step(
+        world: &mut World,
+        buildings: &mut Buildings,
+        jobs: &mut Jobs,
+        store: usize,
+        site: usize,
+    ) {
+        use core_sim::JOB_CHECK_INTERVAL_TICKS;
+        let w = Entity(0);
+        let carrying = world.inventory(w).unwrap().count_of("wood") > 0;
+        let at = if carrying || buildings.site_needs(site) == 0 {
+            buildings.sites[site].worker_position()
+        } else {
+            buildings.buildings[store].worker_slot_position(0)
+        };
+        world.set_position(w, at);
+        world.tick = JOB_CHECK_INTERVAL_TICKS * (world.tick / JOB_CHECK_INTERVAL_TICKS + 1);
+        jobs.update(world, buildings);
+        buildings.tick_production(2.0);
+    }
+
+    fn reload(world: &World, buildings: &Buildings, jobs: &Jobs) -> (World, Buildings, Jobs) {
+        let saved =
+            ron::to_string(&SaveEnvelope::capture(metadata(), world, buildings, jobs)).unwrap();
+        let loaded: SaveEnvelope = ron::from_str(&saved).unwrap();
+        (
+            World::from_snapshot(loaded.world).unwrap(),
+            loaded.buildings,
+            loaded.jobs,
+        )
+    }
+
+    #[test]
+    fn in_progress_construction_survives_save_load_and_finishes_identically() {
+        let (mut world, mut buildings, mut jobs, store, site) = construction_state();
+        for _ in 0..3 {
+            construction_step(&mut world, &mut buildings, &mut jobs, store, site);
+        }
+        assert!(buildings.sites[site].delivered > 0);
+        assert!(buildings.sites[site].completed.is_none());
+        assert_eq!(buildings.sites[site].builder, Some(Entity(0)));
+
+        let (mut world2, mut buildings2, mut jobs2) = reload(&world, &buildings, &jobs);
+        assert_eq!(buildings2.sites, buildings.sites);
+        assert_eq!(buildings2.buildings, buildings.buildings);
+        assert_eq!(jobs2.jobs(Entity(0)), jobs.jobs(Entity(0)));
+
+        for _ in 0..12 {
+            construction_step(&mut world, &mut buildings, &mut jobs, store, site);
+            construction_step(&mut world2, &mut buildings2, &mut jobs2, store, site);
+        }
+        assert!(buildings2.sites[site].completed.is_some());
+        assert_eq!(buildings2.sites, buildings.sites);
+        assert_eq!(buildings2.buildings, buildings.buildings);
+    }
+
+    #[test]
+    fn completed_construction_survives_save_load() {
+        let (mut world, mut buildings, mut jobs, store, site) = construction_state();
+        for _ in 0..20 {
+            construction_step(&mut world, &mut buildings, &mut jobs, store, site);
+        }
+        let built = buildings.sites[site].completed.expect("completed");
+        let (_, buildings2, jobs2) = reload(&world, &buildings, &jobs);
+        assert_eq!(buildings2.sites[site].completed, Some(built));
+        assert_eq!(buildings2.buildings[built].def, "ore_storage");
+        assert!(buildings2.buildings[built].is_storage);
+        assert_eq!(buildings2.buildings, buildings.buildings);
+        assert!(jobs2.jobs(Entity(0)).is_empty());
+    }
 }

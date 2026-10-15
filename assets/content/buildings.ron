@@ -117,4 +117,24 @@
             "wood": 15.0,
         },
     ),
+    (
+        id: "wood_storage",
+        name: "Wood Store",
+        width: 4,
+        depth: 4,
+        worker_slots: 1,
+        input_slots: 8,
+        output_slots: 8,
+        stack_limit: 250,
+        input_resources: [
+            "wood",
+        ],
+        output_resources: [
+            "wood",
+        ],
+        storage: true,
+        cost: {
+            "wood": 15.0,
+        },
+    ),
 ]

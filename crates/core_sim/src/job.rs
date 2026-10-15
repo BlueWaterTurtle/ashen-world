@@ -31,6 +31,9 @@ pub enum Job {
         to: usize,
         item: ResourceKind,
     },
+    /// Reserve construction `site`, fetch its material from the output of `from`,
+    /// deliver it and build.
+    Build { site: usize, from: usize },
 }
 
 impl Job {
@@ -38,7 +41,7 @@ impl Job {
     pub fn building(&self) -> usize {
         match *self {
             Job::Work { building } => building,
-            Job::Haul { from, .. } => from,
+            Job::Haul { from, .. } | Job::Build { from, .. } => from,
         }
     }
 }
@@ -75,6 +78,8 @@ enum Chosen {
     Work(usize),
     /// Index of the haul job in the worker's list.
     Haul(usize),
+    /// Index of the build job in the worker's list.
+    Build(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +139,14 @@ impl Jobs {
         }
         let removed = entry.jobs.remove(index);
         entry.hauling = None;
+        if let Job::Build { site, .. } = removed {
+            if let Some(site) = buildings.sites.get_mut(site) {
+                if site.builder == Some(worker) {
+                    site.builder = None;
+                    site.worked = false;
+                }
+            }
+        }
         if let Job::Work { building } = removed {
             if entry.active.is_some_and(|a| a.building == building) {
                 Self::release(worker, entry, buildings, world);
@@ -193,6 +206,24 @@ impl Jobs {
         }
         let building = match job {
             Job::Work { building } => building,
+            Job::Build { site, from } => {
+                let Some(target) = buildings.sites.get(site) else {
+                    return Some(JobStatus::Invalid);
+                };
+                if target.completed.is_some() || buildings.buildings.get(from).is_none() {
+                    return Some(JobStatus::Invalid);
+                }
+                return Some(if entry.hauling == Some(index) {
+                    JobStatus::Hauling
+                } else if target.builder.is_some_and(|b| b != worker)
+                    || buildings.site_needs(site) == 0
+                    || buildings.can_supply_site(from, site)
+                {
+                    JobStatus::Queued
+                } else {
+                    JobStatus::Blocked(WorkStatus::MissingInput)
+                });
+            }
             Job::Haul { from, to, item } => {
                 if buildings.buildings.get(from).is_none() || buildings.buildings.get(to).is_none()
                 {
@@ -260,7 +291,36 @@ impl Jobs {
             Self::release(worker, entry, buildings, world);
             false
         });
+        // A reservation lives only as long as its owner keeps the build job and is not suspended.
+        for (index, site) in buildings.sites.iter_mut().enumerate() {
+            site.worked = false;
+            if let Some(owner) = site.builder {
+                let kept = site.completed.is_none()
+                    && self.workers.get(&owner).is_some_and(|entry| {
+                        !entry.suspended
+                            && entry
+                                .jobs
+                                .iter()
+                                .any(|job| matches!(*job, Job::Build { site, .. } if site == index))
+                    });
+                if !kept {
+                    site.builder = None;
+                }
+            }
+        }
         for (&worker, entry) in self.workers.iter_mut() {
+            let jobs_before = entry.jobs.len();
+            entry.jobs.retain(|job| match *job {
+                Job::Build { site, .. } => buildings
+                    .sites
+                    .get(site)
+                    .is_some_and(|s| s.completed.is_none()),
+                _ => true,
+            });
+            if entry.jobs.len() != jobs_before {
+                entry.hauling = None;
+                Self::release(worker, entry, buildings, world);
+            }
             if entry.suspended {
                 entry.hauling = None;
                 Self::release(worker, entry, buildings, world);
@@ -276,6 +336,19 @@ impl Jobs {
                         let ours = entry.active.is_some_and(|a| a.building == building);
                         (b.work_status() == WorkStatus::Ready && (ours || b.has_free_worker_slot()))
                             .then_some(Chosen::Work(building))
+                    }
+                    Job::Build { site, from } => {
+                        let target = buildings.sites.get(site)?;
+                        if target.builder.is_some_and(|b| b != worker) {
+                            return None;
+                        }
+                        let carrying = world
+                            .inventory(worker)
+                            .is_some_and(|inv| inv.count_of(target.material.id()) > 0);
+                        (carrying
+                            || buildings.site_needs(site) == 0
+                            || buildings.can_supply_site(from, site))
+                        .then_some(Chosen::Build(index))
                     }
                     Job::Haul { from, to, item } => {
                         buildings.buildings.get(to)?;
@@ -321,6 +394,44 @@ impl Jobs {
                                 )
                             };
                         }
+                    } else if !world.is_navigating(worker) {
+                        world.navigate_to(worker, target);
+                    }
+                }
+                Some(Chosen::Build(index)) => {
+                    if entry.active.is_some() {
+                        Self::release(worker, entry, buildings, world);
+                    }
+                    entry.hauling = Some(index);
+                    world.set_held(worker, true);
+                    let Job::Build { site, from } = entry.jobs[index] else {
+                        continue;
+                    };
+                    buildings.sites[site].builder = Some(worker);
+                    let material = buildings.sites[site].material.id();
+                    let carrying = world
+                        .inventory(worker)
+                        .is_some_and(|inv| inv.count_of(material) > 0);
+                    let at_site = carrying || buildings.site_needs(site) == 0;
+                    let target = if at_site {
+                        buildings.sites[site].worker_position()
+                    } else if let Some(source) = buildings.buildings.get(from) {
+                        source.worker_slot_position(0)
+                    } else {
+                        continue;
+                    };
+                    let p = world.position(worker);
+                    let dist = ((p.x - target.x).powi(2) + (p.z - target.z).powi(2)).sqrt();
+                    if dist <= ARRIVE_RADIUS {
+                        if let Some(mut inventory) = world.inventory_mut(worker) {
+                            let _ = if at_site {
+                                buildings.site_deliver(site, &mut inventory)
+                            } else {
+                                buildings.site_pickup(from, site, &mut inventory, HAUL_CARRY)
+                            };
+                        }
+                        let target = &mut buildings.sites[site];
+                        target.worked = at_site && target.delivered >= target.required;
                     } else if !world.is_navigating(worker) {
                         world.navigate_to(worker, target);
                     }
@@ -694,5 +805,160 @@ mod tests {
             step(&mut w2, &mut b2, &mut j2, [(miner, 1), (hauler, 1)]);
         }
         assert_eq!(buildings.buildings, b2.buildings);
+    }
+
+    /// A wood store with 30 wood and a requested 15-wood construction site.
+    fn construction_setup() -> (World, Buildings, Jobs, Entity, usize, usize) {
+        let world = World::generate(&WorldConfig {
+            agent_count: 2,
+            ..Default::default()
+        });
+        let worker = world.entities().next().unwrap();
+        let mut buildings = Buildings::default();
+        let store = buildings
+            .place_with_logistics(
+                world.seed,
+                world.terrain_edits(),
+                "wood_storage",
+                Footprint {
+                    x: 0,
+                    z: 0,
+                    width: 2,
+                    depth: 2,
+                },
+                &PlacementRules::default(),
+                BuildingLogistics {
+                    input_slots: 1,
+                    output_slots: 1,
+                    input_resources: vec!["wood".into()],
+                    output_resources: vec!["wood".into()],
+                    is_storage: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        buildings.buildings[store]
+            .outputs
+            .insert_resource("wood", 30);
+        let site = buildings
+            .request_construction(
+                world.seed,
+                world.terrain_edits(),
+                "ore_storage",
+                Footprint {
+                    x: 10,
+                    z: 0,
+                    width: 2,
+                    depth: 2,
+                },
+                &PlacementRules::default(),
+                BuildingLogistics {
+                    input_slots: 1,
+                    output_slots: 1,
+                    input_resources: vec!["iron_ore".into()],
+                    output_resources: vec!["iron_ore".into()],
+                    is_storage: true,
+                    ..Default::default()
+                },
+                ResourceKind::Wood,
+                15,
+            )
+            .unwrap();
+        let mut jobs = Jobs::new();
+        jobs.add_job(worker, Job::Build { site, from: store });
+        (world, buildings, jobs, worker, store, site)
+    }
+
+    /// Teleport the worker to wherever it should be next and run one job check.
+    fn build_step(
+        world: &mut World,
+        buildings: &mut Buildings,
+        jobs: &mut Jobs,
+        w: Entity,
+        store: usize,
+        site: usize,
+    ) {
+        let carrying = world.inventory(w).is_some_and(|i| i.count_of("wood") > 0);
+        let p = if carrying || buildings.site_needs(site) == 0 {
+            buildings.sites[site].worker_position()
+        } else {
+            buildings.buildings[store].worker_slot_position(0)
+        };
+        world.set_position(w, p);
+        world.tick = JOB_CHECK_INTERVAL_TICKS * (world.tick / JOB_CHECK_INTERVAL_TICKS + 1);
+        jobs.update(world, buildings);
+        buildings.tick_production(2.0);
+    }
+
+    #[test]
+    fn construction_request_to_completion() {
+        let (mut world, mut buildings, mut jobs, w, store, site) = construction_setup();
+        assert_eq!(buildings.buildings.len(), 1);
+        // The reserved site cannot be requested twice.
+        assert!(buildings
+            .request_construction(
+                world.seed,
+                world.terrain_edits(),
+                "ore_storage",
+                buildings.sites[site].footprint,
+                &PlacementRules::default(),
+                BuildingLogistics::default(),
+                ResourceKind::Wood,
+                1,
+            )
+            .is_err());
+        for _ in 0..40 {
+            build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
+            if buildings.sites[site].completed.is_some() {
+                break;
+            }
+        }
+        let built = buildings.sites[site].completed.expect("site completed");
+        assert_eq!(buildings.buildings[built].def, "ore_storage");
+        assert!(buildings.buildings[built].is_storage);
+        assert_eq!(buildings.buildings[built].footprint.x, 10);
+        assert_eq!(buildings.buildings[store].outputs.count_of("wood"), 15);
+        assert_eq!(buildings.sites[site].delivered, 15);
+        assert!(buildings.blocks((10, 0)));
+        // Next check drops the finished job and frees the worker.
+        build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
+        assert!(jobs.jobs(w).is_empty());
+        assert!(!world.is_held(w));
+    }
+
+    #[test]
+    fn site_is_reserved_by_one_worker() {
+        let (world, mut buildings, mut jobs, w, store, site) = construction_setup();
+        let mut world = world;
+        let other = world.entities().nth(1).unwrap();
+        jobs.add_job(other, Job::Build { site, from: store });
+        world.set_position(w, buildings.buildings[store].worker_slot_position(0));
+        world.set_position(other, buildings.buildings[store].worker_slot_position(0));
+        world.tick = JOB_CHECK_INTERVAL_TICKS;
+        jobs.update(&mut world, &mut buildings);
+        assert_eq!(buildings.sites[site].builder, Some(w));
+        assert_eq!(world.inventory(w).unwrap().count_of("wood"), HAUL_CARRY);
+        assert_eq!(world.inventory(other).unwrap().count_of("wood"), 0);
+        // Removing the owner's job releases the reservation.
+        jobs.remove_job(w, 0, &mut buildings, &mut world);
+        assert_eq!(buildings.sites[site].builder, None);
+    }
+
+    #[test]
+    fn construction_is_deterministic_across_clone() {
+        let (mut world, mut buildings, mut jobs, w, store, site) = construction_setup();
+        for _ in 0..4 {
+            build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
+        }
+        assert!(buildings.sites[site].completed.is_none());
+        let (mut b2, mut j2) = (buildings.clone(), jobs.clone());
+        let mut w2 = World::from_snapshot(world.snapshot()).expect("restore");
+        for _ in 0..8 {
+            build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
+            build_step(&mut w2, &mut b2, &mut j2, w, store, site);
+        }
+        assert_eq!(buildings.sites, b2.sites);
+        assert_eq!(buildings.buildings, b2.buildings);
+        assert!(buildings.sites[site].completed.is_some());
     }
 }

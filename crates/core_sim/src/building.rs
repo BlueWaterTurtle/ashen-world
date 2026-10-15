@@ -225,7 +225,7 @@ impl SlotInventory {
 }
 
 /// Initial worker and storage capacity for a newly placed building.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildingLogistics {
     pub worker_slots: usize,
     pub input_slots: usize,
@@ -296,6 +296,43 @@ pub struct Buildings {
     pub resources: Vec<ResourceNode>,
     /// Areas where the player may not build (e.g. a city claim plus buffer).
     pub protected: Vec<Footprint>,
+    /// Construction sites (in progress and completed), indexed by site id.
+    #[serde(default)]
+    pub sites: Vec<ConstructionSite>,
+}
+
+/// Seconds a builder must work at a fully supplied site to finish it.
+pub const BUILD_SECONDS: f32 = 4.0;
+
+/// A reserved site where a building is being constructed. Completed sites are
+/// kept (with `completed` set) so site indices held by jobs stay stable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConstructionSite {
+    /// Definition id of the building to create.
+    pub def: String,
+    pub footprint: Footprint,
+    /// Logistics the finished building starts with.
+    pub logistics: BuildingLogistics,
+    /// Material that must be delivered to the site.
+    pub material: ResourceKind,
+    pub required: u32,
+    pub delivered: u32,
+    /// Seconds of construction work done so far.
+    pub progress: f32,
+    /// Worker that has reserved the site.
+    pub builder: Option<Entity>,
+    /// Set by the job system while the builder is at the site with all materials.
+    pub worked: bool,
+    /// Index of the finished building once construction completes.
+    pub completed: Option<usize>,
+}
+
+impl ConstructionSite {
+    /// World position where the builder stands (just south of the footprint).
+    pub fn worker_position(&self) -> WorldPos {
+        let f = self.footprint;
+        WorldPos::new(f.x as f32 + 0.5, 0.0, (f.z + f.depth) as f32 + 0.5)
+    }
 }
 
 impl Buildings {
@@ -378,6 +415,10 @@ impl Buildings {
         logistics: BuildingLogistics,
     ) -> Result<usize, PlaceError> {
         self.validate(seed, edits, fp, rules)?;
+        Ok(self.push_building(def, fp, logistics))
+    }
+
+    fn push_building(&mut self, def: &str, fp: Footprint, logistics: BuildingLogistics) -> usize {
         self.buildings.push(Building {
             def: def.to_string(),
             footprint: fp,
@@ -399,7 +440,105 @@ impl Buildings {
             required_inputs: logistics.required_inputs,
             worked: false,
         });
-        Ok(self.buildings.len() - 1)
+        self.buildings.len() - 1
+    }
+
+    /// Request construction: validate the location, reserve it as a site and
+    /// return the site index. Nothing is built until materials arrive and work is done.
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_construction(
+        &mut self,
+        seed: u64,
+        edits: &TerrainEdits,
+        def: &str,
+        fp: Footprint,
+        rules: &PlacementRules,
+        logistics: BuildingLogistics,
+        material: ResourceKind,
+        required: u32,
+    ) -> Result<usize, PlaceError> {
+        self.validate(seed, edits, fp, rules)?;
+        if self
+            .sites
+            .iter()
+            .any(|s| s.completed.is_none() && s.footprint.overlaps(&fp, rules.building_margin))
+        {
+            return Err(PlaceError::Overlaps);
+        }
+        self.sites.push(ConstructionSite {
+            def: def.to_string(),
+            footprint: fp,
+            logistics,
+            material,
+            required,
+            delivered: 0,
+            progress: 0.0,
+            builder: None,
+            worked: false,
+            completed: None,
+        });
+        Ok(self.sites.len() - 1)
+    }
+
+    /// Material still missing at an unfinished site (0 if finished or unknown).
+    pub fn site_needs(&self, site: usize) -> u32 {
+        self.sites
+            .get(site)
+            .filter(|s| s.completed.is_none())
+            .map_or(0, |s| s.required.saturating_sub(s.delivered))
+    }
+
+    /// Whether `site_pickup` from `source` would move anything.
+    pub fn can_supply_site(&self, source: usize, site: usize) -> bool {
+        match (self.buildings.get(source), self.sites.get(site)) {
+            (Some(s), Some(t)) => {
+                self.site_needs(site) > 0 && s.outputs.count_of(t.material.id()) > 0
+            }
+            _ => false,
+        }
+    }
+
+    /// Move up to `requested` of the site's material (never more than it still
+    /// needs) from `source`'s output into the hauler's inventory.
+    pub fn site_pickup(
+        &mut self,
+        source: usize,
+        site: usize,
+        inventory: &mut Inventory,
+        requested: u32,
+    ) -> Result<u32, LogisticsError> {
+        let material = self
+            .sites
+            .get(site)
+            .ok_or(LogisticsError::BuildingNotFound)?
+            .material;
+        let wanted = requested.min(self.site_needs(site));
+        let source = self
+            .buildings
+            .get_mut(source)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        let taken = source.outputs.remove(material.id(), wanted);
+        inventory.add(material.id(), taken);
+        Ok(taken)
+    }
+
+    /// Deliver carried material to the site; excess stays with the hauler.
+    pub fn site_deliver(
+        &mut self,
+        site: usize,
+        inventory: &mut Inventory,
+    ) -> Result<u32, LogisticsError> {
+        let needs = self.site_needs(site);
+        let target = self
+            .sites
+            .get_mut(site)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        let moved = needs.min(inventory.count_of(target.material.id()));
+        if moved > 0 {
+            inventory.remove(target.material.id(), moved);
+            target.delivered += moved;
+        }
+        Ok(moved)
     }
 
     pub fn assign_worker(
@@ -689,6 +828,28 @@ impl Buildings {
     /// Advance production by `dt` seconds. A building is worked while the job
     /// system has flagged it, a worker holds a slot, and it is ready to run.
     pub fn tick_production(&mut self, dt: f32) {
+        for index in 0..self.sites.len() {
+            let site = &mut self.sites[index];
+            if site.completed.is_some()
+                || !site.worked
+                || site.builder.is_none()
+                || site.delivered < site.required
+                || dt <= 0.0
+                || dt.is_nan()
+            {
+                continue;
+            }
+            site.progress += dt;
+            if site.progress >= BUILD_SECONDS {
+                let (def, fp, logistics) =
+                    (site.def.clone(), site.footprint, site.logistics.clone());
+                site.progress = BUILD_SECONDS;
+                site.builder = None;
+                site.worked = false;
+                let built = self.push_building(&def, fp, logistics);
+                self.sites[index].completed = Some(built);
+            }
+        }
         for building in &mut self.buildings {
             let worked = building.worked
                 && building.workers.iter().any(Option::is_some)
