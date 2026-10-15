@@ -5,6 +5,17 @@ use core_sim::{BuildingLogistics, Footprint, Job, PlacementRules, ResourceKind, 
 use crate::ui::UiAction;
 use crate::App;
 
+/// Adds `entity` to the selection, or removes it, never emptying the selection.
+fn toggle_selection(selection: &mut Vec<core_sim::Entity>, entity: core_sim::Entity) {
+    if let Some(index) = selection.iter().position(|&e| e == entity) {
+        if selection.len() > 1 {
+            selection.remove(index);
+        }
+    } else {
+        selection.push(entity);
+    }
+}
+
 impl App {
     pub(super) fn apply_ui_action(&mut self, action: UiAction) {
         match action {
@@ -12,6 +23,18 @@ impl App {
                 let _ = self.world.select_character(entity);
                 self.selected_entities.clear();
                 self.selected_entities.push(entity);
+            }
+            UiAction::ToggleSelect(entity) => {
+                toggle_selection(&mut self.selected_entities, entity);
+                let primary_kept = self
+                    .world
+                    .selected_character()
+                    .is_some_and(|primary| self.selected_entities.contains(&primary));
+                if !primary_kept {
+                    if let Some(&first) = self.selected_entities.first() {
+                        let _ = self.world.select_character(first);
+                    }
+                }
             }
             UiAction::Recruit(entity) => {
                 if let Some(recruiter) = self.world.selected_character() {
@@ -157,5 +180,27 @@ impl App {
                 self.build_status = Some(format!("Can't build here: {error:?}."));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toggle_selection;
+    use core_sim::Entity;
+
+    #[test]
+    fn toggle_adds_and_removes() {
+        let mut selection = vec![Entity(1)];
+        toggle_selection(&mut selection, Entity(2));
+        assert_eq!(selection, vec![Entity(1), Entity(2)]);
+        toggle_selection(&mut selection, Entity(1));
+        assert_eq!(selection, vec![Entity(2)]);
+    }
+
+    #[test]
+    fn toggle_keeps_last_member() {
+        let mut selection = vec![Entity(3)];
+        toggle_selection(&mut selection, Entity(3));
+        assert_eq!(selection, vec![Entity(3)]);
     }
 }

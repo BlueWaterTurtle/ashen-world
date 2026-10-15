@@ -8,6 +8,7 @@ mod mesh;
 mod picking;
 mod renderer;
 mod save;
+mod side_panel;
 mod terrain_editor;
 mod ui;
 
