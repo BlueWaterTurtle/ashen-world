@@ -1,175 +1,23 @@
 //! Serializable content definitions and RON loading.
+//!
+//! Preferred API: [`load_content`] returns a fully validated [`Content`] from a flat
+//! directory of `<domain>.ron` files. The layered [`registry`]/[`cache`] loader is the
+//! lower-level mod-overlay mechanism for a single domain; it does no validation and is
+//! not used by the game yet.
 
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use serde::Deserialize;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub mod cache;
+pub mod domains;
+pub mod manifest;
 pub mod registry;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Faction {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub hostile_by_default: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UnitArchetype {
-    pub id: String,
-    pub name: String,
-    pub faction: String,
-    pub max_health: f32,
-    pub move_speed: f32,
-    /// Id of a [`Race`].
-    pub race: String,
-    /// Id of a [`Behavior`].
-    pub behavior: String,
-    /// Whether this unit archetype can be recruited into player control.
-    #[serde(default)]
-    pub recruitable: bool,
-}
-
-/// A modification to a named stat: `(base + flat) * (1 + percent)`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StatModifier {
-    pub stat: String,
-    #[serde(default)]
-    pub flat: f32,
-    #[serde(default)]
-    pub percent: f32,
-}
-
-/// Apply modifiers for `stat` to `base`. Flat bonuses sum first, then percentages sum.
-pub fn effective_stat(stat: &str, base: f32, modifiers: &[StatModifier]) -> f32 {
-    let (flat, pct) = modifiers
-        .iter()
-        .filter(|m| m.stat == stat)
-        .fold((0.0, 0.0), |(f, p), m| (f + m.flat, p + m.percent));
-    (base + flat) * (1.0 + pct)
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Race {
-    pub id: String,
-    pub name: String,
-    /// Base stat values keyed by stat name (e.g. "strength").
-    pub base_stats: BTreeMap<String, f32>,
-    /// Racial buffs and debuffs.
-    #[serde(default)]
-    pub modifiers: Vec<StatModifier>,
-}
-
-impl Race {
-    /// Effective value of `stat` (base plus racial modifiers); 0 base if undefined.
-    pub fn stat(&self, stat: &str) -> f32 {
-        let base = self.base_stats.get(stat).copied().unwrap_or(0.0);
-        effective_stat(stat, base, &self.modifiers)
-    }
-}
-
-/// A placeable building type. Everything about placement and production is data.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BuildingDef {
-    pub id: String,
-    pub name: String,
-    /// Footprint in cells (width along x, depth along z).
-    pub width: i32,
-    pub depth: i32,
-    /// Resource node type this must be placed on (e.g. "iron_ore"); `None` = anywhere.
-    #[serde(default)]
-    pub requires_resource: Option<String>,
-    /// Minimum footprint-average richness for the required resource, in `[0, 1]`.
-    #[serde(default)]
-    pub min_resource_richness: Option<f32>,
-    /// Minimum footprint-average soil fertility, in `[0, 1]`.
-    #[serde(default)]
-    pub min_fertility: Option<f32>,
-    /// Number of workers that can be assigned to this building.
-    #[serde(default)]
-    pub worker_slots: usize,
-    /// Number of distinct resource stacks accepted as production inputs.
-    #[serde(default)]
-    pub input_slots: usize,
-    /// Number of distinct resource stacks held as production outputs.
-    #[serde(default)]
-    pub output_slots: usize,
-    /// Maximum quantity of one resource type per input/output slot.
-    #[serde(default = "default_building_stack_limit")]
-    pub stack_limit: u32,
-    /// Resource types accepted by production inputs or storage.
-    #[serde(default)]
-    pub input_resources: Vec<String>,
-    /// Resources that must be in the input slots for production to run.
-    #[serde(default)]
-    pub required_inputs: Vec<String>,
-    /// Resource types this building can produce or hold for dispatch.
-    #[serde(default)]
-    pub output_resources: Vec<String>,
-    /// Whether this building accepts output transfers from other buildings.
-    #[serde(default)]
-    pub storage: bool,
-    /// Whether this building mines ore into its output slot while worked.
-    #[serde(default)]
-    pub mine: bool,
-    /// Whether residents can live here.
-    #[serde(default)]
-    pub dwelling: bool,
-    /// Build cost: resource id -> amount.
-    #[serde(default)]
-    pub cost: BTreeMap<String, f32>,
-    /// Crop id grown here, if this is a farm.
-    #[serde(default)]
-    pub crop: Option<String>,
-}
-
-fn default_building_stack_limit() -> u32 {
-    100
-}
-
-/// A crop: grows over in-game days; the clock drives growth, so there is no per-tick work.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Crop {
-    pub id: String,
-    pub name: String,
-    pub growth_days: f32,
-    pub yield_amount: f32,
-    pub yield_resource: String,
-}
-
-/// Data-driven movement behaviour. `wander_range == 0` means the unit stays put.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Behavior {
-    pub id: String,
-    pub name: String,
-    /// Wander destinations are within this many cells (per axis).
-    pub wander_range: i32,
-    pub pause_seconds_min: f32,
-    pub pause_seconds_max: f32,
-    /// Multiplier on the unit's move speed.
-    pub speed_multiplier: f32,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Biome {
-    pub id: String,
-    pub name: String,
-    /// Relative harshness in `[0, 1]`.
-    pub harshness: f32,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Content {
-    pub factions: Vec<Faction>,
-    pub units: Vec<UnitArchetype>,
-    pub biomes: Vec<Biome>,
-    pub races: Vec<Race>,
-    pub behaviors: Vec<Behavior>,
-    pub buildings: Vec<BuildingDef>,
-    pub crops: Vec<Crop>,
-}
+pub use domains::{
+    effective_stat, Behavior, Biome, BuildingDef, ContentDomain, Crop, Faction, KnownIds, Race,
+    Reference, StatModifier, UnitArchetype,
+};
 
 #[derive(Debug)]
 pub enum ContentError {
@@ -221,10 +69,7 @@ fn invalid(path: &Path, message: String) -> ContentError {
     }
 }
 
-fn check_unique<'a>(
-    path: &Path,
-    ids: impl Iterator<Item = &'a String>,
-) -> Result<(), ContentError> {
+fn check_unique<'a>(path: &Path, ids: impl Iterator<Item = &'a str>) -> Result<(), ContentError> {
     let mut seen = std::collections::HashSet::new();
     for id in ids {
         if id.is_empty() {
@@ -237,143 +82,59 @@ fn check_unique<'a>(
     Ok(())
 }
 
-/// Load `factions.ron`, `units.ron`, `biomes.ron`, `races.ron` and `behaviors.ron` from `dir` and validate them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Content {
+    pub factions: Vec<Faction>,
+    pub units: Vec<UnitArchetype>,
+    pub biomes: Vec<Biome>,
+    pub races: Vec<Race>,
+    pub behaviors: Vec<Behavior>,
+    pub buildings: Vec<BuildingDef>,
+    pub crops: Vec<Crop>,
+}
+
+/// Load, uniqueness-check and validate one domain from `<dir>/<NAME>.ron`.
+fn load_domain<T: ContentDomain>(dir: &Path) -> Result<(Vec<T>, PathBuf), ContentError> {
+    let path = dir.join(format!("{}.ron", T::NAME));
+    let items: Vec<T> = load_file(&path)?;
+    check_unique(&path, items.iter().map(|i| i.id()))?;
+    for item in &items {
+        item.validate().map_err(|m| invalid(&path, m))?;
+    }
+    Ok((items, path))
+}
+
+fn check_refs<T: ContentDomain>(
+    ids: &KnownIds,
+    items: &[T],
+    path: &Path,
+) -> Result<(), ContentError> {
+    ids.check_references(items).map_err(|m| invalid(path, m))
+}
+
+/// Load every content domain from `dir` (`factions.ron`, `units.ron`, ...) and validate it,
+/// including cross-domain references.
 pub fn load_content(dir: impl AsRef<Path>) -> Result<Content, ContentError> {
     let dir = dir.as_ref();
-    let fp = dir.join("factions.ron");
-    let up = dir.join("units.ron");
-    let bp = dir.join("biomes.ron");
-    let factions: Vec<Faction> = load_file(&fp)?;
-    let units: Vec<UnitArchetype> = load_file(&up)?;
-    let biomes: Vec<Biome> = load_file(&bp)?;
-    let rp = dir.join("races.ron");
-    let hp = dir.join("behaviors.ron");
-    let races: Vec<Race> = load_file(&rp)?;
-    let behaviors: Vec<Behavior> = load_file(&hp)?;
-    let bdp = dir.join("buildings.ron");
-    let cp = dir.join("crops.ron");
-    let buildings: Vec<BuildingDef> = load_file(&bdp)?;
-    let crops: Vec<Crop> = load_file(&cp)?;
-    check_unique(&bdp, buildings.iter().map(|b| &b.id))?;
-    check_unique(&cp, crops.iter().map(|c| &c.id))?;
-    for c in &crops {
-        if c.growth_days <= 0.0 || c.yield_amount < 0.0 {
-            return Err(invalid(&cp, format!("crop '{}' has invalid values", c.id)));
-        }
-    }
-    for b in &buildings {
-        if b.width < 1 || b.depth < 1 {
-            return Err(invalid(
-                &bdp,
-                format!("building '{}' needs a footprint >= 1x1", b.id),
-            ));
-        }
-        if b.min_resource_richness
-            .into_iter()
-            .chain(b.min_fertility)
-            .any(|value| !(0.0..=1.0).contains(&value))
-        {
-            return Err(invalid(
-                &bdp,
-                format!("building '{}' has a site threshold outside [0, 1]", b.id),
-            ));
-        }
-        if b.stack_limit == 0
-            || (!b.input_resources.is_empty() && b.input_slots == 0)
-            || (!b.output_resources.is_empty() && b.output_slots == 0)
-            || (b.storage
-                && (b.worker_slots == 0 || b.input_slots == 0 || b.input_resources.is_empty()))
-        {
-            return Err(invalid(
-                &bdp,
-                format!("building '{}' has incompatible logistics slots", b.id),
-            ));
-        }
-        let is_production = !b.output_resources.is_empty() && !b.storage;
-        if (is_production && b.worker_slots == 0)
-            || b.required_inputs
-                .iter()
-                .any(|item| !b.input_resources.contains(item))
-        {
-            return Err(invalid(
-                &bdp,
-                format!(
-                    "building '{}' needs a worker slot and required inputs must be accepted inputs",
-                    b.id
-                ),
-            ));
-        }
-        if let Some(c) = &b.crop {
-            if !crops.iter().any(|x| &x.id == c) {
-                return Err(invalid(
-                    &bdp,
-                    format!("building '{}' references unknown crop '{c}'", b.id),
-                ));
-            }
-        }
-    }
-    check_unique(&rp, races.iter().map(|r| &r.id))?;
-    check_unique(&hp, behaviors.iter().map(|b| &b.id))?;
-    for b in &behaviors {
-        if b.wander_range < 0
-            || b.pause_seconds_min < 0.0
-            || b.pause_seconds_max < b.pause_seconds_min
-            || b.speed_multiplier < 0.0
-        {
-            return Err(invalid(
-                &hp,
-                format!("behavior '{}' has invalid values", b.id),
-            ));
-        }
-    }
-    for r in &races {
-        for m in &r.modifiers {
-            if !r.base_stats.contains_key(&m.stat) {
-                return Err(invalid(
-                    &rp,
-                    format!("race '{}' modifies undefined stat '{}'", r.id, m.stat),
-                ));
-            }
-        }
-    }
+    let (factions, _) = load_domain::<Faction>(dir)?;
+    let (units, units_path) = load_domain::<UnitArchetype>(dir)?;
+    let (biomes, _) = load_domain::<Biome>(dir)?;
+    let (races, _) = load_domain::<Race>(dir)?;
+    let (behaviors, _) = load_domain::<Behavior>(dir)?;
+    let (buildings, buildings_path) = load_domain::<BuildingDef>(dir)?;
+    let (crops, _) = load_domain::<Crop>(dir)?;
 
-    check_unique(&fp, factions.iter().map(|f| &f.id))?;
-    check_unique(&up, units.iter().map(|u| &u.id))?;
-    check_unique(&bp, biomes.iter().map(|b| &b.id))?;
-    for u in &units {
-        if !factions.iter().any(|f| f.id == u.faction) {
-            return Err(invalid(
-                &up,
-                format!("unit '{}' references unknown faction '{}'", u.id, u.faction),
-            ));
-        }
-        if !races.iter().any(|r| r.id == u.race) {
-            return Err(invalid(
-                &up,
-                format!("unit '{}' references unknown race '{}'", u.id, u.race),
-            ));
-        }
-        if !behaviors.iter().any(|b| b.id == u.behavior) {
-            return Err(invalid(
-                &up,
-                format!(
-                    "unit '{}' references unknown behavior '{}'",
-                    u.id, u.behavior
-                ),
-            ));
-        }
-        if u.max_health <= 0.0 || u.move_speed < 0.0 {
-            return Err(invalid(&up, format!("unit '{}' has invalid stats", u.id)));
-        }
-    }
-    for b in &biomes {
-        if !(0.0..=1.0).contains(&b.harshness) {
-            return Err(invalid(
-                &bp,
-                format!("biome '{}' harshness must be in [0, 1]", b.id),
-            ));
-        }
-    }
+    let mut ids = KnownIds::default();
+    ids.register(&factions);
+    ids.register(&units);
+    ids.register(&biomes);
+    ids.register(&races);
+    ids.register(&behaviors);
+    ids.register(&buildings);
+    ids.register(&crops);
+    check_refs(&ids, &buildings, &buildings_path)?;
+    check_refs(&ids, &units, &units_path)?;
+
     Ok(Content {
         factions,
         units,
@@ -466,6 +227,26 @@ mod tests {
         .unwrap();
         let err = load_content(&dir).unwrap_err();
         assert!(err.to_string().contains("unknown behavior 'nope'"));
+    }
+
+    #[test]
+    fn dangling_crop_reference_fails() {
+        let dir = std::env::temp_dir().join("ashen_world_bad_crop_ref");
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["factions", "biomes", "races", "behaviors", "crops", "units"] {
+            std::fs::copy(
+                assets_dir().join(format!("{f}.ron")),
+                dir.join(format!("{f}.ron")),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            dir.join("buildings.ron"),
+            r#"[(id:"f",name:"F",width:1,depth:1,crop:Some("nope"))]"#,
+        )
+        .unwrap();
+        let err = load_content(&dir).unwrap_err();
+        assert!(err.to_string().contains("unknown crop 'nope'"));
     }
 
     #[test]
