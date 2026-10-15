@@ -6,6 +6,7 @@ mod mesh;
 mod picking;
 mod renderer;
 mod save;
+mod terrain_editor;
 mod ui;
 
 use std::sync::Arc;
@@ -15,12 +16,13 @@ use camera::Camera;
 use context_menu::ContextTarget;
 use core_sim::{
     BuildingLogistics, Buildings, Footprint, Job, Jobs, PlacementRules, ResourceKind, Schedule,
-    TerrainEdit, WorkerActivity, World, WorldPos, TICK_DT,
+    WorkerActivity, World, WorldPos, TICK_DT,
 };
 use glam::Vec3;
 use picking::{agent_in_frustum, select_players_in_rect};
 use renderer::{AgentInstance, Renderer};
 use save::{SaveEnvelope, SaveMetadata, QUICK_SAVE_PATH};
+use terrain_editor::{TerrainEditor, TerrainTool};
 use ui::{GameUi, HudData, UiAction};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -45,41 +47,6 @@ struct Input {
     left_press: Option<(f64, f64)>,
     selection_rect: Option<[f32; 4]>,
     right_press: Option<(f64, f64)>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TerrainTool {
-    Raise,
-    Lower,
-    Flatten,
-    Smooth,
-    Slope,
-}
-
-/// Terrain editor mode: while active, left clicks reshape the terrain instead of selecting.
-struct TerrainEditor {
-    active: bool,
-    tool: TerrainTool,
-    radius: i32,
-    strength_mm: i32,
-    slope_start: Option<(i32, i32)>,
-}
-
-impl TerrainEditor {
-    fn status(&self) -> String {
-        let tool = match self.tool {
-            TerrainTool::Raise => "Raise",
-            TerrainTool::Lower => "Lower",
-            TerrainTool::Flatten => "Flatten",
-            TerrainTool::Smooth => "Smooth",
-            TerrainTool::Slope => "Slope (click start, then end)",
-        };
-        format!(
-            "Terrain editor: {tool}, radius {} m, strength {:.1} m. F1-F5 tool, [ ] radius, - = strength, T exits.",
-            self.radius,
-            self.strength_mm as f32 / 1000.0
-        )
-    }
 }
 
 struct Stats {
@@ -137,13 +104,7 @@ impl App {
             build_mode: None,
             construct_mode: false,
             build_status: None,
-            editor: TerrainEditor {
-                active: false,
-                tool: TerrainTool::Raise,
-                radius: 6,
-                strength_mm: 1000,
-                slope_start: None,
-            },
+            editor: TerrainEditor::default(),
             camera,
             input: Input::default(),
             accumulator: 0.0,
@@ -214,55 +175,7 @@ impl App {
     /// Queue the active terrain tool at lattice point `at`, unless it would leave an
     /// existing building on a slope too steep to stand on.
     fn apply_terrain_tool(&mut self, at: (i32, i32)) {
-        let editor = &mut self.editor;
-        let edit = match editor.tool {
-            TerrainTool::Raise => TerrainEdit::Raise {
-                center: at,
-                radius: editor.radius,
-                amount_mm: editor.strength_mm,
-            },
-            TerrainTool::Lower => TerrainEdit::Lower {
-                center: at,
-                radius: editor.radius,
-                amount_mm: editor.strength_mm,
-            },
-            TerrainTool::Flatten => {
-                let target =
-                    self.world
-                        .terrain_edits()
-                        .height(self.world.seed, at.0 as f32, at.1 as f32);
-                TerrainEdit::Flatten {
-                    center: at,
-                    radius: editor.radius,
-                    target_mm: (target * 1000.0).round() as i32,
-                }
-            }
-            TerrainTool::Smooth => TerrainEdit::Smooth {
-                center: at,
-                radius: editor.radius,
-            },
-            TerrainTool::Slope => match editor.slope_start.take() {
-                None => {
-                    editor.slope_start = Some(at);
-                    self.build_status = Some("Slope start set; click the end point.".into());
-                    return;
-                }
-                Some(from) => TerrainEdit::Slope {
-                    from,
-                    to: at,
-                    half_width: editor.radius,
-                },
-            },
-        };
-        if self
-            .buildings
-            .terrain_edit_is_allowed(self.world.seed, self.world.terrain_edits(), edit)
-        {
-            self.world.queue_terrain_edit(edit);
-            self.build_status = Some(self.editor.status());
-        } else {
-            self.build_status = Some("Edit would leave a building on too steep a slope.".into());
-        }
+        self.build_status = Some(self.editor.apply(at, &mut self.world, &self.buildings));
     }
 
     fn handle_world_click(&mut self, screen_x: f32, screen_y: f32) {
@@ -870,14 +783,13 @@ impl ApplicationHandler for App {
                         KeyCode::F1 | KeyCode::F2 | KeyCode::F3 | KeyCode::F4 | KeyCode::F5
                             if down && self.editor.active =>
                         {
-                            self.editor.tool = match code {
+                            self.editor.set_tool(match code {
                                 KeyCode::F1 => TerrainTool::Raise,
                                 KeyCode::F2 => TerrainTool::Lower,
                                 KeyCode::F3 => TerrainTool::Flatten,
                                 KeyCode::F4 => TerrainTool::Smooth,
                                 _ => TerrainTool::Slope,
-                            };
-                            self.editor.slope_start = None;
+                            });
                             self.build_status = Some(self.editor.status());
                         }
                         KeyCode::F5 if down => self.quick_save(),
@@ -886,14 +798,12 @@ impl ApplicationHandler for App {
                             if down && self.editor.active =>
                         {
                             let step = if code == KeyCode::BracketLeft { -1 } else { 1 };
-                            self.editor.radius = (self.editor.radius + step)
-                                .clamp(1, core_sim::terrain::MAX_BRUSH_RADIUS);
+                            self.editor.adjust_radius(step);
                             self.build_status = Some(self.editor.status());
                         }
                         KeyCode::Minus | KeyCode::Equal if down && self.editor.active => {
                             let step = if code == KeyCode::Minus { -250 } else { 250 };
-                            self.editor.strength_mm =
-                                (self.editor.strength_mm + step).clamp(250, 10_000);
+                            self.editor.adjust_strength(step);
                             self.build_status = Some(self.editor.status());
                         }
                         KeyCode::KeyA | KeyCode::ArrowLeft => self.input.left = down,
