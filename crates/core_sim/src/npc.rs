@@ -5,7 +5,9 @@ use crate::chunk::WorldPos;
 use serde::{Deserialize, Serialize};
 
 /// Stable, persistent identifier for an NPC. Survives across distance and despawn/resume.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub struct NpcId(pub u64);
 
 impl fmt::Display for NpcId {
@@ -137,7 +139,9 @@ impl Inventory {
 ///
 /// Distinguishes full per-tick simulation from cheaper throttled simulation and
 /// coarse background persistence, while keeping rendering decisions independent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub enum SimulationTier {
     /// Full movement, pathfinding, and behavior updates every simulation tick.
     /// Rendered when visible. Used for player characters, squad members, and nearby NPCs.

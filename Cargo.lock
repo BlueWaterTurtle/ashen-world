@@ -763,6 +763,8 @@ dependencies = [
  "glam",
  "naga",
  "pollster",
+ "ron",
+ "serde",
  "wgpu",
  "winit",
 ]

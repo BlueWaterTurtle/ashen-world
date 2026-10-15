@@ -278,7 +278,7 @@ pub struct PlacementRules {
 }
 
 /// Map-wide things placement is checked against.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Buildings {
     pub buildings: Vec<Building>,
     pub resources: Vec<ResourceNode>,

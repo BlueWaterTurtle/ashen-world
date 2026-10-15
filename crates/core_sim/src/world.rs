@@ -1,5 +1,5 @@
-use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 use crate::behavior::Behavior;
 use crate::chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
@@ -277,8 +277,25 @@ impl World {
     /// pathfinding caches are derived and intentionally omitted.
     pub fn snapshot(&self) -> WorldSnapshot {
         let mut agents = Vec::with_capacity(self.entity_count());
-        for (_, (entity, position, velocity, path, behavior_id, pause, player_controlled,
-            recruitable, npc_id, kind, tier, skills, inventory, nav_goal)) in self
+        for (
+            _,
+            (
+                entity,
+                position,
+                velocity,
+                path,
+                behavior_id,
+                pause,
+                player_controlled,
+                recruitable,
+                npc_id,
+                kind,
+                tier,
+                skills,
+                inventory,
+                nav_goal,
+            ),
+        ) in self
             .ecs
             .query::<(
                 &Entity,
@@ -392,9 +409,10 @@ impl World {
         }
         if let Some(selected) = snapshot.selected_player_character {
             if !present.get(selected.0 as usize).copied().unwrap_or(false)
-                || !snapshot.agents.iter().any(|agent| {
-                    agent.entity == selected && agent.record.player_controlled
-                })
+                || !snapshot
+                    .agents
+                    .iter()
+                    .any(|agent| agent.entity == selected && agent.record.player_controlled)
             {
                 return Err("world snapshot has an invalid selected player character".into());
             }
@@ -1488,8 +1506,14 @@ mod tests {
             radius: 2,
             target_mm: 10_000,
         });
-        uninterrupted.skills_mut(Entity(2)).unwrap().set("crafting", 4);
-        uninterrupted.inventory_mut(Entity(2)).unwrap().add("wood", 9);
+        uninterrupted
+            .skills_mut(Entity(2))
+            .unwrap()
+            .set("crafting", 4);
+        uninterrupted
+            .inventory_mut(Entity(2))
+            .unwrap()
+            .add("wood", 9);
         uninterrupted.set_held(Entity(3), true);
 
         let saved = uninterrupted.snapshot();

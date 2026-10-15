@@ -25,3 +25,4 @@ rustc-ice-*.txt
 
 # Runtime binary content cache
 .cache/
+/saves/
