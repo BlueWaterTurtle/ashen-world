@@ -7,7 +7,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use core_sim::{Buildings, Jobs, World, WorldSnapshot};
 use serde::{Deserialize, Serialize};
 
-pub const FORMAT_VERSION: u32 = 1;
+/// Upgrades a save by exactly one format version, in place.
+type Migration = fn(&mut SaveEnvelope);
+
+/// Ordered upgrade steps: entry `i` upgrades a version `i + 1` save to version `i + 2`.
+///
+/// Older saves are deserialized straight into the current types, so a migration can only
+/// rely on added fields having `#[serde(default)]`. Fixing up values is fine; removing or
+/// retyping a field needs a legacy struct for the old shape first.
+const MIGRATIONS: &[Migration] = &[];
+
+/// The version this build writes; it follows from the number of migrations.
+pub const FORMAT_VERSION: u32 = MIGRATIONS.len() as u32 + 1;
 pub const QUICK_SAVE_PATH: &str = "saves/quicksave.ron";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,15 +171,40 @@ pub fn read_save(path: impl AsRef<Path>) -> Result<SaveEnvelope, String> {
     let path = path.as_ref();
     let text = fs::read_to_string(path)
         .map_err(|error| format!("could not read save '{}': {error}", path.display()))?;
-    let envelope: SaveEnvelope = ron::from_str(&text)
+    let header: SaveHeader = ron::from_str(&text)
         .map_err(|error| format!("invalid save '{}': {error}", path.display()))?;
-    if envelope.format_version != FORMAT_VERSION {
+    // Reject unknown versions before the full parse, which could fail confusingly.
+    check_version(header.format_version, MIGRATIONS)?;
+    let mut envelope: SaveEnvelope = ron::from_str(&text)
+        .map_err(|error| format!("invalid save '{}': {error}", path.display()))?;
+    migrate(&mut envelope, MIGRATIONS)?;
+    Ok(envelope)
+}
+
+/// Just the version field, readable even when the rest of the save has a different shape.
+#[derive(Deserialize)]
+struct SaveHeader {
+    format_version: u32,
+}
+
+fn check_version(version: u32, migrations: &[Migration]) -> Result<(), String> {
+    let supported = migrations.len() as u32 + 1;
+    if version == 0 || version > supported {
         return Err(format!(
-            "unsupported save format version {} (supported version is {FORMAT_VERSION})",
-            envelope.format_version
+            "unsupported save format version {version} (supported version is {supported})"
         ));
     }
-    Ok(envelope)
+    Ok(())
+}
+
+/// Brings `envelope` up to the newest format by applying each pending migration in order.
+fn migrate(envelope: &mut SaveEnvelope, migrations: &[Migration]) -> Result<(), String> {
+    check_version(envelope.format_version, migrations)?;
+    for step in &migrations[(envelope.format_version - 1) as usize..] {
+        step(envelope);
+    }
+    envelope.format_version = migrations.len() as u32 + 1;
+    Ok(())
 }
 
 pub fn write_save(path: impl AsRef<Path>, envelope: &SaveEnvelope) -> Result<(), String> {
@@ -329,6 +365,56 @@ mod tests {
         let error = read_save(&path).unwrap_err();
         assert!(error.contains("unsupported save format version"));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrations_run_in_order_from_the_saved_version() {
+        fn append_a(e: &mut SaveEnvelope) {
+            e.metadata.scenario_name.push('a');
+        }
+        fn append_b(e: &mut SaveEnvelope) {
+            e.metadata.scenario_name.push('b');
+        }
+        let chain: &[Migration] = &[append_a, append_b];
+
+        let mut from_v1 = envelope();
+        from_v1.format_version = 1;
+        migrate(&mut from_v1, chain).unwrap();
+        assert_eq!(from_v1.metadata.scenario_name, "Defaultab");
+        assert_eq!(from_v1.format_version, 3);
+
+        let mut from_v2 = envelope();
+        from_v2.format_version = 2;
+        migrate(&mut from_v2, chain).unwrap();
+        assert_eq!(from_v2.metadata.scenario_name, "Defaultb");
+        assert_eq!(from_v2.format_version, 3);
+
+        let mut current = envelope();
+        current.format_version = 3;
+        migrate(&mut current, chain).unwrap();
+        assert_eq!(current.metadata.scenario_name, "Default");
+    }
+
+    #[test]
+    fn migration_rejects_zero_and_future_versions_without_changes() {
+        let chain: &[Migration] = &[|e| e.metadata.scenario_name.push('x')];
+        for version in [0, 3] {
+            let mut saved = envelope();
+            saved.format_version = version;
+            let error = migrate(&mut saved, chain).unwrap_err();
+            assert!(error.contains("unsupported save format version"));
+            assert_eq!(saved.metadata.scenario_name, "Default");
+        }
+    }
+
+    #[test]
+    fn checked_in_v1_save_still_loads() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/save_v1.ron");
+        let loaded = read_save(path).unwrap();
+        assert_eq!(loaded.format_version, FORMAT_VERSION);
+        assert_eq!(loaded.buildings.buildings.len(), 1);
+        assert_eq!(loaded.buildings.buildings[0].inputs.count_of("wood"), 4);
+        assert_eq!(loaded.jobs.jobs(Entity(0)), &[Job::Work { building: 0 }]);
     }
 
     #[test]

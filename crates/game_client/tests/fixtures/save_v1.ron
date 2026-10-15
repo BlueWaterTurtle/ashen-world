@@ -1,0 +1,251 @@
+(
+    format_version: 1,
+    metadata: (
+        scenario_selector: "default",
+        scenario_name: "Default",
+        manifest_source: "content/manifest.ron",
+        content_domains: [
+            "units",
+        ],
+        systems: [
+            "core_step",
+        ],
+        mods: [
+            (
+                id: "example",
+                version: "1.0",
+            ),
+        ],
+        timestamp_unix_seconds: 123,
+    ),
+    world: (
+        seed: 1,
+        tick: 0,
+        behaviors: [
+            (
+                wander_range: 40,
+                pause_ticks_min: 30,
+                pause_ticks_max: 150,
+                speed: 3.0,
+                recruitable: true,
+            ),
+        ],
+        max_path_requests_per_tick: 8,
+        rng: (
+            state: 16390740445785211217,
+        ),
+        terrain_edits: [],
+        pending_terrain_edits: [],
+        agents: [
+            (
+                entity: (0),
+                record: (
+                    id: (1),
+                    kind: PersistentNpc,
+                    position: (
+                        x: -65.85583,
+                        y: 19.511189,
+                        z: 156.439,
+                    ),
+                    velocity: (
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    ),
+                    goal: None,
+                    behavior_id: 0,
+                    pause_ticks: 0,
+                    player_controlled: true,
+                    recruitable: false,
+                    tier: Active,
+                    skills: (
+                        levels: {},
+                    ),
+                    inventory: (
+                        items: [],
+                    ),
+                ),
+                path: None,
+            ),
+            (
+                entity: (1),
+                record: (
+                    id: (2),
+                    kind: PersistentNpc,
+                    position: (
+                        x: -7.8496857,
+                        y: 25.12308,
+                        z: 97.4763,
+                    ),
+                    velocity: (
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    ),
+                    goal: None,
+                    behavior_id: 0,
+                    pause_ticks: 0,
+                    player_controlled: false,
+                    recruitable: true,
+                    tier: Active,
+                    skills: (
+                        levels: {},
+                    ),
+                    inventory: (
+                        items: [],
+                    ),
+                ),
+                path: None,
+            ),
+            (
+                entity: (2),
+                record: (
+                    id: (3),
+                    kind: PersistentNpc,
+                    position: (
+                        x: -102.1349,
+                        y: 12.419498,
+                        z: -89.2531,
+                    ),
+                    velocity: (
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    ),
+                    goal: None,
+                    behavior_id: 0,
+                    pause_ticks: 0,
+                    player_controlled: false,
+                    recruitable: true,
+                    tier: Active,
+                    skills: (
+                        levels: {},
+                    ),
+                    inventory: (
+                        items: [],
+                    ),
+                ),
+                path: None,
+            ),
+            (
+                entity: (3),
+                record: (
+                    id: (4),
+                    kind: PersistentNpc,
+                    position: (
+                        x: 155.90178,
+                        y: 7.486495,
+                        z: 10.690239,
+                    ),
+                    velocity: (
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    ),
+                    goal: None,
+                    behavior_id: 0,
+                    pause_ticks: 0,
+                    player_controlled: false,
+                    recruitable: true,
+                    tier: Active,
+                    skills: (
+                        levels: {},
+                    ),
+                    inventory: (
+                        items: [],
+                    ),
+                ),
+                path: None,
+            ),
+        ],
+        agent_slots: 4,
+        wander_queue: [
+            0,
+            1,
+            2,
+            3,
+        ],
+        wander_queued: [
+            true,
+            true,
+            true,
+            true,
+        ],
+        held: [],
+        selected_player_character: Some((0)),
+        lod: (
+            enabled: false,
+            active_radius: 64.0,
+            reduced_radius: 160.0,
+            reduced_tick_interval: 4,
+            dormant_tick_interval: 10,
+            track_player_focus: true,
+        ),
+        focus_points: [],
+    ),
+    buildings: (
+        buildings: [
+            (
+                def: "mine",
+                footprint: (
+                    x: 0,
+                    z: 0,
+                    width: 2,
+                    depth: 2,
+                ),
+                planted_tick: None,
+                workers: [
+                    None,
+                ],
+                inputs: (
+                    slots: [
+                        Some((
+                            item: "wood",
+                            count: 4,
+                        )),
+                        None,
+                    ],
+                    stack_limit: 10,
+                    allowed_resources: [],
+                ),
+                outputs: (
+                    slots: [
+                        None,
+                        None,
+                        None,
+                    ],
+                    stack_limit: 10,
+                    allowed_resources: [],
+                ),
+                is_storage: false,
+                mine: Some((
+                    output: (
+                        item: IronOre,
+                        count: 0,
+                    ),
+                    progress: 1.25,
+                )),
+                smelt: None,
+                required_inputs: [],
+                worked: false,
+            ),
+        ],
+        resources: [],
+        protected: [],
+        sites: [],
+    ),
+    jobs: (
+        workers: {
+            (0): (
+                jobs: [
+                    Work(
+                        building: 0,
+                    ),
+                ],
+                suspended: false,
+                active: None,
+                hauling: None,
+            ),
+        },
+    ),
+)
