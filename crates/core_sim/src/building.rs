@@ -1,8 +1,7 @@
 use crate::chunk::WorldPos;
 use crate::clock::GameClock;
 use crate::npc::{Inventory, ItemStack};
-use crate::production::MineProduction;
-#[cfg(test)]
+use crate::production::{MineProduction, SmeltProduction, SMELT_SECONDS_PER_INGOT};
 use crate::resource::ResourceKind;
 use crate::terrain::{
     fertility_at, resource_richness_at, TerrainEdit, TerrainEdits, MAX_STEP_HEIGHT,
@@ -52,6 +51,9 @@ pub struct Building {
     pub is_storage: bool,
     /// Ore production state, present for mines.
     pub mine: Option<MineProduction>,
+    /// Ore smelting state, present for smelters (iron ore in, iron ingots out).
+    #[serde(default)]
+    pub smelt: Option<SmeltProduction>,
     /// Resources that must be present in `inputs` for the building to run.
     pub required_inputs: Vec<String>,
     /// Set by the job system while a worker is at a slot and working.
@@ -148,6 +150,14 @@ impl SlotInventory {
         self.slots.iter().flatten()
     }
 
+    /// Whether this inventory accepts `item` at all.
+    pub fn allows(&self, item: &str) -> bool {
+        self.stack_limit > 0
+            && !self.slots.is_empty()
+            && (self.allowed_resources.is_empty()
+                || self.allowed_resources.iter().any(|r| r == item))
+    }
+
     pub fn insert_resource(&mut self, item: &str, count: u32) -> u32 {
         self.insert(item, count)
     }
@@ -225,6 +235,7 @@ pub struct BuildingLogistics {
     pub output_resources: Vec<String>,
     pub is_storage: bool,
     pub is_mine: bool,
+    pub is_smelter: bool,
     pub required_inputs: Vec<String>,
 }
 
@@ -239,6 +250,7 @@ impl Default for BuildingLogistics {
             output_resources: Vec::new(),
             is_storage: false,
             is_mine: false,
+            is_smelter: false,
             required_inputs: Vec::new(),
         }
     }
@@ -383,6 +395,7 @@ impl Buildings {
             ),
             is_storage: logistics.is_storage,
             mine: logistics.is_mine.then(MineProduction::default),
+            smelt: logistics.is_smelter.then(SmeltProduction::default),
             required_inputs: logistics.required_inputs,
             worked: false,
         });
@@ -610,20 +623,105 @@ impl Buildings {
         Ok(building.outputs.insert(item, count))
     }
 
+    /// Haul pickup: move up to `requested` of `item` from the building's output
+    /// into the hauler's inventory, limited by room at `destination`'s input.
+    /// No worker slot is needed. Returns the amount picked up.
+    pub fn haul_pickup(
+        &mut self,
+        source: usize,
+        destination: usize,
+        inventory: &mut Inventory,
+        item: &str,
+        requested: u32,
+    ) -> Result<u32, LogisticsError> {
+        if source == destination {
+            return Err(LogisticsError::SameBuilding);
+        }
+        let room = self
+            .buildings
+            .get(destination)
+            .ok_or(LogisticsError::BuildingNotFound)?
+            .inputs
+            .available_for(item);
+        let source = self
+            .buildings
+            .get_mut(source)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        let taken = source.outputs.remove(item, requested.min(room));
+        inventory.add(item, taken);
+        Ok(taken)
+    }
+
+    /// Haul drop-off: move `item` from the hauler's inventory into the building's
+    /// input. Anything that does not fit stays with the hauler. Returns the amount delivered.
+    pub fn haul_drop(
+        &mut self,
+        destination: usize,
+        inventory: &mut Inventory,
+        item: &str,
+    ) -> Result<u32, LogisticsError> {
+        let building = self
+            .buildings
+            .get_mut(destination)
+            .ok_or(LogisticsError::BuildingNotFound)?;
+        let moved = inventory
+            .count_of(item)
+            .min(building.inputs.available_for(item));
+        if moved == 0 {
+            return Ok(0);
+        }
+        let removed = inventory.remove(item, moved);
+        debug_assert!(removed);
+        Ok(building.inputs.insert(item, moved))
+    }
+
+    /// Whether `haul_pickup` from `source` to `destination` would move anything.
+    pub fn can_haul(&self, source: usize, destination: usize, item: &str) -> bool {
+        source != destination
+            && match (self.buildings.get(source), self.buildings.get(destination)) {
+                (Some(s), Some(d)) => {
+                    s.outputs.count_of(item) > 0 && d.inputs.available_for(item) > 0
+                }
+                _ => false,
+            }
+    }
+
     /// Advance production by `dt` seconds. A building is worked while the job
     /// system has flagged it, a worker holds a slot, and it is ready to run.
     pub fn tick_production(&mut self, dt: f32) {
         for building in &mut self.buildings {
-            let Some(mine) = &mut building.mine else {
-                continue;
-            };
             let worked = building.worked
                 && building.workers.iter().any(Option::is_some)
                 && building
                     .required_inputs
                     .iter()
                     .all(|i| building.inputs.count_of(i) > 0);
-            mine.advance(dt, worked);
+            if let Some(mine) = &mut building.mine {
+                mine.advance(dt, worked);
+                // Move mined ore into the building's output storage so it can be hauled.
+                let ore = mine.output.item.id();
+                let moved = building.outputs.insert(ore, mine.output.count);
+                mine.output.take(moved);
+            }
+            if let Some(smelt) = &mut building.smelt {
+                let ore = ResourceKind::IronOre.id();
+                let ingot = ResourceKind::IronIngot.id();
+                let ready =
+                    building.inputs.count_of(ore) > 0 && building.outputs.available_for(ingot) > 0;
+                if !worked || !ready || dt <= 0.0 || dt.is_nan() {
+                    continue;
+                }
+                smelt.progress += dt;
+                while smelt.progress >= SMELT_SECONDS_PER_INGOT
+                    && building.inputs.count_of(ore) > 0
+                    && building.outputs.available_for(ingot) > 0
+                {
+                    building.inputs.remove(ore, 1);
+                    building.outputs.insert(ingot, 1);
+                    smelt.progress -= SMELT_SECONDS_PER_INGOT;
+                }
+                smelt.progress = smelt.progress.min(SMELT_SECONDS_PER_INGOT);
+            }
         }
     }
 
@@ -807,6 +905,7 @@ mod tests {
                     output_resources: vec!["wheat".into()],
                     is_storage: false,
                     is_mine: false,
+                    is_smelter: false,
                     required_inputs: Vec::new(),
                 },
             )
@@ -827,6 +926,7 @@ mod tests {
                     output_resources: vec!["wheat".into()],
                     is_storage: true,
                     is_mine: false,
+                    is_smelter: false,
                     required_inputs: Vec::new(),
                 },
             )

@@ -326,4 +326,104 @@ mod tests {
         assert!(differences.contains("content domains changed"));
         assert!(differences.contains("loaded mods changed"));
     }
+
+    #[test]
+    fn production_chain_survives_save_load_and_continues_identically() {
+        use core_sim::{ResourceKind, JOB_CHECK_INTERVAL_TICKS};
+        let mut world = World::generate(&WorldConfig {
+            agent_count: 2,
+            ..Default::default()
+        });
+        let worker = Entity(0);
+        let hauler = Entity(1);
+        let mut buildings = Buildings::default();
+        let mut place = |x: i32, logistics: BuildingLogistics| {
+            buildings
+                .place_with_logistics(
+                    world.seed,
+                    world.terrain_edits(),
+                    "b",
+                    Footprint {
+                        x,
+                        z: 0,
+                        width: 2,
+                        depth: 2,
+                    },
+                    &PlacementRules::default(),
+                    logistics,
+                )
+                .unwrap()
+        };
+        let mine = place(
+            0,
+            BuildingLogistics {
+                worker_slots: 1,
+                output_slots: 1,
+                output_resources: vec!["iron_ore".into()],
+                is_mine: true,
+                ..Default::default()
+            },
+        );
+        let shop = place(
+            10,
+            BuildingLogistics {
+                worker_slots: 1,
+                input_slots: 1,
+                output_slots: 1,
+                input_resources: vec!["iron_ore".into()],
+                output_resources: vec!["iron_ingot".into()],
+                required_inputs: vec!["iron_ore".into()],
+                is_smelter: true,
+                ..Default::default()
+            },
+        );
+        let mut jobs = Jobs::default();
+        jobs.add_job(worker, Job::Work { building: mine });
+        jobs.add_job(
+            hauler,
+            Job::Haul {
+                from: mine,
+                to: shop,
+                item: ResourceKind::IronOre,
+            },
+        );
+        let step = |world: &mut World, buildings: &mut Buildings, jobs: &mut Jobs, at: usize| {
+            for who in [worker, hauler] {
+                let p = buildings.buildings[at].worker_slot_position(0);
+                world.set_position(who, p);
+            }
+            world.tick = JOB_CHECK_INTERVAL_TICKS * (world.tick / JOB_CHECK_INTERVAL_TICKS + 1);
+            jobs.update(world, buildings);
+            buildings.tick_production(2.0);
+        };
+        // Mine ore, then pick it up: the hauler is mid-trip carrying ore.
+        for _ in 0..3 {
+            step(&mut world, &mut buildings, &mut jobs, mine);
+        }
+        assert!(world.inventory(hauler).unwrap().count_of("iron_ore") > 0);
+
+        let saved = ron::to_string(&SaveEnvelope::capture(
+            metadata(),
+            &world,
+            &buildings,
+            &jobs,
+        ))
+        .unwrap();
+        let loaded: SaveEnvelope = ron::from_str(&saved).unwrap();
+        let mut world2 = World::from_snapshot(loaded.world).unwrap();
+        let (mut buildings2, mut jobs2) = (loaded.buildings, loaded.jobs);
+        assert_eq!(buildings2.buildings, buildings.buildings);
+        assert_eq!(
+            world2.inventory(hauler).unwrap().count_of("iron_ore"),
+            world.inventory(hauler).unwrap().count_of("iron_ore")
+        );
+
+        // Deliver ore to the workshop and keep going on both timelines.
+        for at in [shop, shop, shop, shop] {
+            step(&mut world, &mut buildings, &mut jobs, at);
+            step(&mut world2, &mut buildings2, &mut jobs2, at);
+        }
+        assert_eq!(buildings2.buildings, buildings.buildings);
+        assert!(buildings.buildings[shop].inputs.count_of("iron_ore") > 0);
+    }
 }

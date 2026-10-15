@@ -22,13 +22,15 @@ pub use building::{
 };
 pub use chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
 pub use clock::GameClock;
-pub use job::{Job, JobStatus, Jobs, WorkerActivity, JOB_CHECK_INTERVAL_TICKS};
+pub use job::{Job, JobStatus, Jobs, WorkerActivity, HAUL_CARRY, JOB_CHECK_INTERVAL_TICKS};
 pub use npc::{
     DespawnError, EntityKind, Inventory, ItemStack, LodConfig, NavGoal, NpcId, PersistentNpcRecord,
     SimTier, SimulationTier, Skills,
 };
 pub use path::{find_path, Cell, Pathfinder};
-pub use production::{MineProduction, OutputSlot, ORE_SECONDS_PER_UNIT};
+pub use production::{
+    MineProduction, OutputSlot, SmeltProduction, ORE_SECONDS_PER_UNIT, SMELT_SECONDS_PER_INGOT,
+};
 pub use resource::{ResourceDef, ResourceKind, DEFAULT_STACK_SIZE, ORE_STACK_SIZE};
 pub use rng::Rng;
 pub use system::{CoreStepSystem, Schedule, SimSystem};
