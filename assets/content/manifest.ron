@@ -1,0 +1,16 @@
+// Composition entry point: enabled content domains (<name>.ron in this directory)
+// and simulation systems (registered in core_sim's Schedule), in execution order.
+(
+    content_domains: [
+        "factions",
+        "races",
+        "behaviors",
+        "biomes",
+        "crops",
+        "buildings",
+        "units",
+    ],
+    systems: [
+        "core_step",
+    ],
+)

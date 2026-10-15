@@ -10,6 +10,7 @@ pub mod path;
 pub mod production;
 pub mod resource;
 pub mod rng;
+pub mod system;
 pub mod terrain;
 pub mod world;
 
@@ -30,6 +31,7 @@ pub use path::{find_path, Cell, Pathfinder};
 pub use production::{MineProduction, OutputSlot, ORE_SECONDS_PER_UNIT};
 pub use resource::{ResourceDef, ResourceKind, DEFAULT_STACK_SIZE, ORE_STACK_SIZE};
 pub use rng::Rng;
+pub use system::{CoreStepSystem, Schedule, SimSystem};
 pub use terrain::{
     fertility_at, height_at, is_walkable, is_walkable_with, resource_richness_at, ChunkStreamer,
     ChunkTerrain, TerrainEdit, TerrainEdits,
