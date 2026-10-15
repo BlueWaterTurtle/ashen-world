@@ -62,17 +62,52 @@ pub(crate) fn show(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
 }
 
 fn squad_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
-    ui.small(format!("{} selected", p.selected_entities.len()));
+    ui.small(format!(
+        "{} selected · Ctrl/Shift-click to multi-select",
+        p.selected_entities.len()
+    ));
     for character in p.world.player_characters() {
         let selected = p.selected_entities.contains(&character);
-        let label = format!(
+        let (activity, color) = activity(p.jobs, p.buildings, character);
+        let label = egui::RichText::new(format!(
             "{}{}",
             if selected { "● " } else { "○ " },
             character_label(character)
-        );
-        if ui.selectable_label(selected, label).clicked() {
-            p.actions.push(UiAction::Select(character));
-        }
+        ));
+        ui.horizontal(|ui| {
+            let response = ui.selectable_label(selected, label);
+            ui.label(egui::RichText::new(activity).small().color(color));
+            if response.clicked() {
+                let multi = ui.input(|i| i.modifiers.command || i.modifiers.shift);
+                p.actions.push(if multi {
+                    UiAction::ToggleSelect(character)
+                } else {
+                    UiAction::Select(character)
+                });
+            }
+        });
+    }
+}
+
+/// Short activity text and colour for a squad row, from the worker's top job.
+fn activity(jobs: &Jobs, buildings: &Buildings, worker: Entity) -> (&'static str, egui::Color32) {
+    const IDLE: egui::Color32 = egui::Color32::from_rgb(140, 144, 152);
+    const GOOD: egui::Color32 = egui::Color32::from_rgb(112, 224, 174);
+    const WARN: egui::Color32 = egui::Color32::from_rgb(225, 190, 120);
+    const BAD: egui::Color32 = egui::Color32::from_rgb(224, 112, 112);
+    if jobs.is_suspended(worker) {
+        return ("ordered", WARN);
+    }
+    match jobs.job_status(worker, 0, buildings) {
+        None => ("idle", IDLE),
+        Some(JobStatus::Working) => ("working", GOOD),
+        Some(JobStatus::Moving) => ("moving", WARN),
+        Some(JobStatus::Hauling) => ("hauling", GOOD),
+        Some(JobStatus::Queued) => ("waiting", IDLE),
+        Some(JobStatus::Suspended) => ("ordered", WARN),
+        Some(JobStatus::Blocked(_)) => ("blocked", BAD),
+        Some(JobStatus::NoFreeSlot) => ("no slot", BAD),
+        Some(JobStatus::Invalid) => ("invalid", BAD),
     }
 }
 

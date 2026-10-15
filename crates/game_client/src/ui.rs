@@ -9,6 +9,8 @@ use winit::window::Window;
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
     Select(Entity),
+    /// Add or remove a survivor from the current selection (ctrl/shift-click).
+    ToggleSelect(Entity),
     Recruit(Entity),
     SelectBuilding(String),
     CancelBuilding,
