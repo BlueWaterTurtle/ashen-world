@@ -137,14 +137,6 @@ impl App {
             KeyCode::KeyD | KeyCode::ArrowRight => self.input.right = down,
             KeyCode::KeyW | KeyCode::ArrowUp => self.input.forward = down,
             KeyCode::KeyS | KeyCode::ArrowDown => self.input.back = down,
-            KeyCode::KeyC if down => {
-                self.construct_mode = !self.construct_mode;
-                self.build_status = Some(if self.construct_mode {
-                    "Construction mode: pick a building, click to request it.".into()
-                } else {
-                    "Construction mode off.".into()
-                });
-            }
             KeyCode::KeyQ if down => self.camera.orbit(-0.2, 0.0),
             KeyCode::KeyE if down => self.camera.orbit(0.2, 0.0),
             KeyCode::Digit1 if down => self.select_player_slot(0),
@@ -373,29 +365,7 @@ impl App {
                 is_smelter: definition.smelter,
                 required_inputs: definition.required_inputs.clone(),
             };
-            if self.construct_mode {
-                self.request_construction(&definition, footprint, &rules, logistics);
-                return;
-            }
-            match self.buildings.place_with_logistics(
-                self.world.seed,
-                self.world.terrain_edits(),
-                &definition.id,
-                footprint,
-                &rules,
-                logistics,
-            ) {
-                Ok(_) => {
-                    self.build_status = Some(format!("Placed {}.", definition.name));
-                    self.build_mode = None;
-                    if let Some(ui) = &mut self.ui {
-                        ui.set_selected_building(None);
-                    }
-                }
-                Err(error) => {
-                    self.build_status = Some(format!("Can't place here: {error:?}."));
-                }
-            }
+            self.place_building(&definition, footprint, &rules, logistics);
             return;
         }
 
