@@ -307,6 +307,27 @@ mod tests {
     }
 
     #[test]
+    fn every_building_costs_one_iron_ore_except_the_free_mine() {
+        let s = bootstrap(&assets(), None);
+        for definition in &s.building_defs {
+            if definition.mine {
+                assert!(
+                    definition.cost.is_empty(),
+                    "{} should be free",
+                    definition.id
+                );
+            } else {
+                assert_eq!(
+                    definition.cost.iter().collect::<Vec<_>>(),
+                    vec![(&"iron_ore".to_string(), &1.0)],
+                    "{} should cost exactly one iron ore",
+                    definition.id
+                );
+            }
+        }
+    }
+
+    #[test]
     fn valid_save_restores_the_saved_world_display_free() {
         let fresh = bootstrap(&assets(), None);
         let metadata = crate::save::SaveMetadata::from_summary(&fresh.summary);
