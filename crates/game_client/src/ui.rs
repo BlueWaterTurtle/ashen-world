@@ -76,6 +76,7 @@ impl GameUi {
             None,
         );
         let renderer = egui_wgpu::Renderer::new(device, format, None, 1, false);
+        apply_theme(&context);
         Self {
             context,
             state,
@@ -200,6 +201,7 @@ impl GameUi {
             }
 
             egui::SidePanel::right("game_hud")
+                .frame(panel_frame())
                 .default_width(270.0)
                 .min_width(230.0)
                 .resizable(true)
@@ -423,6 +425,61 @@ impl GameUi {
         self.textures_delta = TexturesDelta::default();
         command_buffers
     }
+}
+
+const PANEL_FILL: Color32 = Color32::from_rgba_premultiplied(22, 24, 28, 235);
+const ACCENT: Color32 = Color32::from_rgb(225, 190, 120);
+const DIVIDER: Color32 = Color32::from_rgb(62, 66, 74);
+
+/// Dark, framed panel style with an amber accent line on the inner edge.
+fn panel_frame() -> egui::Frame {
+    egui::Frame::none()
+        .fill(PANEL_FILL)
+        .stroke(Stroke::new(1.0_f32, ACCENT))
+        .inner_margin(egui::Margin::same(12.0))
+        .shadow(egui::epaint::Shadow {
+            offset: egui::vec2(-2.0, 0.0),
+            blur: 12.0,
+            spread: 0.0,
+            color: Color32::from_black_alpha(120),
+        })
+}
+
+/// Applies the shared HUD theme: spacing, typography, rounded widgets and
+/// distinct hover/selected/disabled states. Uses only built-in egui primitives.
+fn apply_theme(context: &egui::Context) {
+    context.style_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        style.spacing.button_padding = egui::vec2(8.0, 3.0);
+        style
+            .text_styles
+            .insert(egui::TextStyle::Heading, egui::FontId::proportional(17.0));
+        let visuals = &mut style.visuals;
+        visuals.override_text_color = Some(Color32::from_rgb(222, 224, 228));
+        visuals.window_fill = PANEL_FILL;
+        visuals.panel_fill = PANEL_FILL;
+        visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(225, 190, 120, 70);
+        visuals.selection.stroke = Stroke::new(1.0_f32, ACCENT);
+        visuals.hyperlink_color = ACCENT;
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, DIVIDER);
+        visuals.widgets.noninteractive.fg_stroke.color = Color32::from_rgb(200, 203, 210);
+        let radius = egui::Rounding::same(4.0);
+        visuals.widgets.inactive.bg_fill = Color32::from_rgb(40, 44, 52);
+        visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(40, 44, 52);
+        visuals.widgets.hovered.bg_fill = Color32::from_rgb(58, 64, 76);
+        visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(58, 64, 76);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT);
+        visuals.widgets.active.bg_fill = Color32::from_rgb(80, 72, 52);
+        visuals.widgets.active.weak_bg_fill = Color32::from_rgb(80, 72, 52);
+        for widget in [
+            &mut visuals.widgets.noninteractive,
+            &mut visuals.widgets.inactive,
+            &mut visuals.widgets.hovered,
+            &mut visuals.widgets.active,
+        ] {
+            widget.rounding = radius;
+        }
+    });
 }
 
 fn character_label(entity: Entity) -> String {
