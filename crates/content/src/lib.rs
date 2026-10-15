@@ -18,6 +18,7 @@ pub use domains::{
     effective_stat, Behavior, Biome, BuildingDef, ContentDomain, Crop, Faction, KnownIds, Race,
     Reference, StatModifier, UnitArchetype,
 };
+pub use manifest::Manifest;
 
 #[derive(Debug)]
 pub enum ContentError {
@@ -115,35 +116,55 @@ fn check_refs<T: ContentDomain>(
 /// Load every content domain from `dir` (`factions.ron`, `units.ron`, ...) and validate it,
 /// including cross-domain references.
 pub fn load_content(dir: impl AsRef<Path>) -> Result<Content, ContentError> {
+    load_content_with(dir, &Manifest::default())
+}
+
+/// Load only the domains enabled in `manifest`; disabled domains stay empty and their files are
+/// not read. References into a disabled domain are not checked.
+pub fn load_content_with(
+    dir: impl AsRef<Path>,
+    manifest: &Manifest,
+) -> Result<Content, ContentError> {
     let dir = dir.as_ref();
-    let (factions, _) = load_domain::<Faction>(dir)?;
-    let (units, units_path) = load_domain::<UnitArchetype>(dir)?;
-    let (biomes, _) = load_domain::<Biome>(dir)?;
-    let (races, _) = load_domain::<Race>(dir)?;
-    let (behaviors, _) = load_domain::<Behavior>(dir)?;
-    let (buildings, buildings_path) = load_domain::<BuildingDef>(dir)?;
-    let (crops, _) = load_domain::<Crop>(dir)?;
+    let mut c = Content::default();
+    let mut unchecked: Vec<&'static str> = Vec::new();
+    let mut paths = (PathBuf::new(), PathBuf::new());
+
+    macro_rules! domain {
+        ($field:ident, $ty:ty) => {
+            if manifest.has_domain(<$ty>::NAME) {
+                let (items, path) = load_domain::<$ty>(dir)?;
+                c.$field = items;
+                path
+            } else {
+                unchecked.push(<$ty>::KIND);
+                PathBuf::new()
+            }
+        };
+    }
+    domain!(factions, Faction);
+    paths.0 = domain!(units, UnitArchetype);
+    domain!(biomes, Biome);
+    domain!(races, Race);
+    domain!(behaviors, Behavior);
+    paths.1 = domain!(buildings, BuildingDef);
+    domain!(crops, Crop);
+    let (units_path, buildings_path) = paths;
 
     let mut ids = KnownIds::default();
-    ids.register(&factions);
-    ids.register(&units);
-    ids.register(&biomes);
-    ids.register(&races);
-    ids.register(&behaviors);
-    ids.register(&buildings);
-    ids.register(&crops);
-    check_refs(&ids, &buildings, &buildings_path)?;
-    check_refs(&ids, &units, &units_path)?;
-
-    Ok(Content {
-        factions,
-        units,
-        biomes,
-        races,
-        behaviors,
-        buildings,
-        crops,
-    })
+    ids.register(&c.factions);
+    ids.register(&c.units);
+    ids.register(&c.biomes);
+    ids.register(&c.races);
+    ids.register(&c.behaviors);
+    ids.register(&c.buildings);
+    ids.register(&c.crops);
+    for kind in unchecked {
+        ids.mark_unchecked(kind);
+    }
+    check_refs(&ids, &c.buildings, &buildings_path)?;
+    check_refs(&ids, &c.units, &units_path)?;
+    Ok(c)
 }
 
 #[cfg(test)]
@@ -247,6 +268,24 @@ mod tests {
         .unwrap();
         let err = load_content(&dir).unwrap_err();
         assert!(err.to_string().contains("unknown crop 'nope'"));
+    }
+
+    #[test]
+    fn default_manifest_matches_load_content() {
+        let a = load_content(assets_dir()).unwrap();
+        let b = load_content_with(assets_dir(), &Manifest::default()).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn disabled_domains_are_skipped() {
+        let m = Manifest {
+            content_domains: vec!["factions".into(), "races".into(), "behaviors".into()],
+            systems: vec![],
+        };
+        let c = load_content_with(assets_dir(), &m).unwrap();
+        assert!(!c.factions.is_empty() && !c.races.is_empty());
+        assert!(c.units.is_empty() && c.buildings.is_empty() && c.crops.is_empty());
     }
 
     #[test]
