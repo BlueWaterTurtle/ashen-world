@@ -26,3 +26,6 @@ rustc-ice-*.txt
 # Runtime binary content cache
 .cache/
 /saves/
+
+# Graphics assets (3D models and textures)
+/assets/models/
