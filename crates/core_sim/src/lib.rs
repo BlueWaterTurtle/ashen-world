@@ -37,6 +37,6 @@ pub use terrain::{
     ChunkTerrain, TerrainEdit, TerrainEdits,
 };
 pub use world::{
-    ControlError, Entity, PlayerControlled, RecruitError, Recruitable, World, WorldConfig,
-    RECRUIT_MAX_DISTANCE, TICKS_PER_SECOND, TICK_DT,
+    AgentSnapshot, ControlError, Entity, PlayerControlled, RecruitError, Recruitable, World,
+    WorldConfig, WorldSnapshot, RECRUIT_MAX_DISTANCE, TICKS_PER_SECOND, TICK_DT,
 };

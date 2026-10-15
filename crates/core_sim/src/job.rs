@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use crate::building::{Buildings, WorkStatus};
 use crate::chunk::WorldPos;
 use crate::world::{ControlError, Entity, World, TICKS_PER_SECOND};
+use serde::{Deserialize, Serialize};
 
 /// How often (in ticks) job assignments are re-evaluated (twice per second).
 pub const JOB_CHECK_INTERVAL_TICKS: u64 = (TICKS_PER_SECOND / 2) as u64;
@@ -17,7 +18,7 @@ pub const JOB_CHECK_INTERVAL_TICKS: u64 = (TICKS_PER_SECOND / 2) as u64;
 const ARRIVE_RADIUS: f32 = 0.75;
 
 /// Something a worker can be assigned to. Extend with new variants for new job kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Job {
     /// Staff a worker slot of the building at this index.
     Work { building: usize },
@@ -49,14 +50,14 @@ pub enum JobStatus {
     Invalid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct ActiveWork {
     building: usize,
     slot: usize,
     arrived: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct WorkerJobs {
     jobs: Vec<Job>,
     suspended: bool,
@@ -64,7 +65,7 @@ struct WorkerJobs {
 }
 
 /// Job lists for all workers. Iteration order is by entity for determinism.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Jobs {
     workers: BTreeMap<Entity, WorkerJobs>,
 }

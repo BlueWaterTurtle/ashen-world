@@ -103,6 +103,29 @@ Composition lives in `game_client::bootstrap` (no winit/wgpu) and runs in this o
 
 A structured `StartupSummary` printed at boot lists scenario (requested vs fallback), manifest, domains, systems, loaded mods, skipped mods with reasons, overrides (which mod replaced which id), any fallbacks and warnings.
 
+## Save/load
+
+The simulation core exposes a serde-backed `WorldSnapshot`; it does not read or write files.
+Snapshots preserve the tick and RNG state, active NPC component and path state, terrain deltas
+and queued edits, behavior/LOD configuration, focus points, and deterministic agent scheduling
+queues. The client save envelope also preserves buildings (including inventories and production
+progress) and jobs (including active worker assignments). Terrain is regenerated from its seed
+and saved edits; walkability/pathfinder caches and rendered/streamed terrain chunks are derived
+and rebuilt. The current game clock is derived from the saved tick.
+
+Save files are RON envelopes with `format_version: 1`, the world snapshot, and metadata containing
+the selected scenario selector/name, manifest source, enabled domains, systems, loaded mod ids and
+versions, and a Unix timestamp. Writes use a same-directory temporary file followed by rename.
+This first pass rejects any unsupported format version; it does not migrate older formats.
+
+At startup, `ASHEN_LOAD` accepts a save name (looked up as `saves/<name>.ron`) or a file path.
+Bootstrap recomposes the scenario recorded in the save before restoring it, then checks the
+scenario, manifest source, domains, systems, and loaded mod ids/versions against the save metadata.
+An unreadable, invalid, unsupported, or incompatible save is reported in `StartupSummary` and
+startup continues with a fresh world. Without `ASHEN_LOAD`, startup behavior is unchanged. During
+play, **F5** writes `saves/quicksave.ron` and **F9** loads it when its composition matches the
+current startup. The default `saves/` directory is gitignored.
+
 ## Adding a content domain
 
 1. Add `crates/content/src/domains/<name>.rs` with the type and a `ContentDomain` impl

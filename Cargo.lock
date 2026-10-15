@@ -447,6 +447,7 @@ name = "core_sim"
 version = "0.1.0"
 dependencies = [
  "hecs",
+ "serde",
 ]
 
 [[package]]
@@ -762,6 +763,8 @@ dependencies = [
  "glam",
  "naga",
  "pollster",
+ "ron",
+ "serde",
  "wgpu",
  "winit",
 ]

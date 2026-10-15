@@ -4,7 +4,7 @@
 use std::fmt;
 use std::path::Path;
 
-use core_sim::{Behavior, Schedule, WorldConfig};
+use core_sim::{Behavior, Buildings, Jobs, Schedule, World, WorldConfig};
 
 /// What was selected at boot and which fallbacks were taken.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +22,8 @@ pub struct StartupSummary {
     pub warnings: Vec<String>,
     /// Mods applied (in order), mods skipped with reasons, and records they replaced.
     pub mods: content::ModReport,
+    pub save_loaded: Option<String>,
+    pub save_fallback: Option<String>,
 }
 
 impl StartupSummary {
@@ -31,6 +33,7 @@ impl StartupSummary {
             || self.content_fallback.is_some()
             || !self.unknown_systems.is_empty()
             || !self.mods.skipped.is_empty()
+            || self.save_fallback.is_some()
     }
 }
 
@@ -61,6 +64,12 @@ impl fmt::Display for StartupSummary {
         }
         if let Some(e) = &self.content_fallback {
             writeln!(f, "startup: content load failed: {e}; using defaults")?;
+        }
+        if let Some(path) = &self.save_loaded {
+            writeln!(f, "startup: save loaded: {path}")?;
+        }
+        if let Some(reason) = &self.save_fallback {
+            writeln!(f, "startup: save fallback: {reason}; using a fresh world")?;
         }
         for n in &self.unknown_systems {
             writeln!(f, "startup: unknown system '{n}' ignored")?;
@@ -96,6 +105,13 @@ pub struct Startup {
     pub building_defs: Vec<content::BuildingDef>,
     pub schedule: Schedule,
     pub summary: StartupSummary,
+    pub loaded_state: Option<LoadedGameState>,
+}
+
+pub struct LoadedGameState {
+    pub world: World,
+    pub buildings: Buildings,
+    pub jobs: Jobs,
 }
 
 /// Compose startup from `assets_root` (`content/`, `scenarios/` and `mods/`); `selector` defaults to
@@ -144,13 +160,64 @@ pub fn bootstrap(assets_root: &Path, selector: Option<&str>) -> Startup {
         content_fallback,
         warnings,
         mods,
+        save_loaded: None,
+        save_fallback: None,
     };
     Startup {
         config,
         building_defs,
         schedule,
         summary,
+        loaded_state: None,
     }
+}
+
+/// Compose and optionally restore a save. An unreadable or incompatible save is
+/// reported in the summary and leaves startup with a fresh world.
+pub fn bootstrap_with_load(
+    assets_root: &Path,
+    selector: Option<&str>,
+    load_source: Option<&str>,
+) -> Startup {
+    let Some(load_source) = load_source else {
+        return bootstrap(assets_root, selector);
+    };
+    let path = crate::save::resolve_load_path(load_source);
+    let envelope = match crate::save::read_save(&path) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            let mut startup = bootstrap(assets_root, selector);
+            startup.summary.save_fallback = Some(error);
+            return startup;
+        }
+    };
+
+    let mut startup = bootstrap(assets_root, Some(&envelope.metadata.scenario_selector));
+    let current = crate::save::SaveMetadata::from_summary(&startup.summary);
+    let differences = envelope.metadata.differences(&current);
+    if !differences.is_empty() {
+        startup.summary.save_fallback = Some(format!(
+            "save composition is incompatible: {}",
+            differences.join("; ")
+        ));
+        return startup;
+    }
+
+    match World::from_snapshot(envelope.world) {
+        Ok(world) => {
+            startup.loaded_state = Some(LoadedGameState {
+                world,
+                buildings: envelope.buildings,
+                jobs: envelope.jobs,
+            });
+            startup.summary.save_loaded = Some(path.display().to_string());
+        }
+        Err(error) => {
+            startup.summary.save_fallback =
+                Some(format!("save world snapshot is invalid: {error}"));
+        }
+    }
+    startup
 }
 
 /// One sim behaviour per unit archetype: the archetype's behaviour definition, with
@@ -226,6 +293,7 @@ mod tests {
     #[test]
     fn default_scenario_preserves_default_behavior() {
         let s = bootstrap(&assets(), None);
+        assert!(s.loaded_state.is_none());
         assert!(!s.summary.any_fallback(), "{}", s.summary);
         assert_eq!(s.summary.scenario_name, "Default");
         assert_eq!(s.config.seed, WorldConfig::default().seed);
@@ -236,6 +304,81 @@ mod tests {
         assert!(s.summary.warnings.is_empty());
         assert_eq!(s.summary.mods, content::ModReport::default());
         assert!(s.summary.to_string().contains("fallbacks: none"));
+    }
+
+    #[test]
+    fn valid_save_restores_the_saved_world_display_free() {
+        let fresh = bootstrap(&assets(), None);
+        let metadata = crate::save::SaveMetadata::from_summary(&fresh.summary);
+        let mut world = World::generate(&fresh.config);
+        world.tick = 47;
+        let envelope = crate::save::SaveEnvelope::capture(
+            metadata,
+            &world,
+            &Buildings::default(),
+            &Jobs::default(),
+        );
+        let path = std::env::temp_dir().join(format!(
+            "ashen_world_bootstrap_load_{}.ron",
+            std::process::id()
+        ));
+        crate::save::write_save(&path, &envelope).unwrap();
+
+        let startup = bootstrap_with_load(&assets(), None, path.to_str());
+        assert_eq!(startup.loaded_state.as_ref().unwrap().world.tick, 47);
+        assert!(startup.summary.save_loaded.is_some());
+        assert!(startup.summary.save_fallback.is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn corrupt_save_falls_back_to_a_fresh_world_with_summary_reason() {
+        let path = std::env::temp_dir().join(format!(
+            "ashen_world_bootstrap_corrupt_{}.ron",
+            std::process::id()
+        ));
+        std::fs::write(&path, "not RON").unwrap();
+        let startup = bootstrap_with_load(&assets(), None, path.to_str());
+        assert!(startup.loaded_state.is_none());
+        assert!(startup.summary.save_fallback.is_some());
+        assert!(startup
+            .summary
+            .to_string()
+            .contains("save fallback: invalid save"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn missing_mod_metadata_is_reported_and_save_is_not_loaded() {
+        let fresh = bootstrap(&assets(), None);
+        let mut metadata = crate::save::SaveMetadata::from_summary(&fresh.summary);
+        metadata.mods.push(crate::save::SaveMod {
+            id: "missing_mod".into(),
+            version: "1.0".into(),
+        });
+        let world = World::generate(&fresh.config);
+        let envelope = crate::save::SaveEnvelope::capture(
+            metadata,
+            &world,
+            &Buildings::default(),
+            &Jobs::default(),
+        );
+        let path = std::env::temp_dir().join(format!(
+            "ashen_world_bootstrap_missing_mod_{}.ron",
+            std::process::id()
+        ));
+        crate::save::write_save(&path, &envelope).unwrap();
+
+        let startup = bootstrap_with_load(&assets(), None, path.to_str());
+        assert!(startup.loaded_state.is_none());
+        assert!(startup
+            .summary
+            .save_fallback
+            .as_ref()
+            .unwrap()
+            .contains("loaded mods changed"));
+        assert!(startup.summary.to_string().contains("missing_mod"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

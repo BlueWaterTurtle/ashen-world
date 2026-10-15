@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 /// Small deterministic PRNG (SplitMix64). Same seed always yields the same sequence.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rng {
     state: u64,
 }

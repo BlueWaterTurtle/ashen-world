@@ -1,4 +1,5 @@
 use crate::chunk::{ChunkCoord, CHUNK_SIZE};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 const WALKABILITY_CACHE_CHUNKS: usize = 64;
@@ -89,7 +90,7 @@ const MAX_HEIGHT_MM: i32 = 100_000;
 
 /// A deterministic terrain-shaping command. Positions are integer lattice points (whole
 /// meters); heights are millimeters, so applying an edit uses only integer arithmetic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TerrainEdit {
     /// Raise terrain around `center`, strongest in the middle and fading to the radius.
     Raise {

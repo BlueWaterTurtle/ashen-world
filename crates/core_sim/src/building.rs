@@ -8,9 +8,10 @@ use crate::terrain::{
     fertility_at, resource_richness_at, TerrainEdit, TerrainEdits, MAX_STEP_HEIGHT,
 };
 use crate::world::Entity;
+use serde::{Deserialize, Serialize};
 
 /// Axis-aligned footprint in world cells: `[x, x + width) x [z, z + depth)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Footprint {
     pub x: i32,
     pub z: i32,
@@ -32,13 +33,13 @@ impl Footprint {
 }
 
 /// A point resource on the map (ore deposit, fertile patch, ...).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResourceNode {
     pub kind: String,
     pub cell: (i32, i32),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Building {
     /// Building definition id (from content).
     pub def: String,
@@ -110,7 +111,7 @@ impl Building {
 }
 
 /// Finite storage where each slot holds one resource type up to `stack_limit`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SlotInventory {
     slots: Vec<Option<ItemStack>>,
     stack_limit: u32,
@@ -277,7 +278,7 @@ pub struct PlacementRules {
 }
 
 /// Map-wide things placement is checked against.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Buildings {
     pub buildings: Vec<Building>,
     pub resources: Vec<ResourceNode>,

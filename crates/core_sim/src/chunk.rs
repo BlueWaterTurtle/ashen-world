@@ -1,8 +1,10 @@
+use serde::{Deserialize, Serialize};
+
 /// Edge length of a chunk in world units (meters).
 pub const CHUNK_SIZE: f32 = 64.0;
 
 /// Integer index of a chunk on the XZ (ground) plane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChunkCoord {
     pub x: i32,
     pub z: i32,
@@ -20,7 +22,7 @@ impl ChunkCoord {
 }
 
 /// A world position in 3D (y is up) in world units.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct WorldPos {
     pub x: f32,
     pub y: f32,

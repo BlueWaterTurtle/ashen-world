@@ -1,7 +1,9 @@
 //! Resource item definitions. Stack sizes live here, in one place.
 
+use serde::{Deserialize, Serialize};
+
 /// Every resource item known to the simulation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ResourceKind {
     Wood,
     Iron,

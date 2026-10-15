@@ -1,12 +1,13 @@
 //! Mine ore production: a bounded output slot plus a delta-time progress accumulator.
 
 use crate::resource::ResourceKind;
+use serde::{Deserialize, Serialize};
 
 /// Worked seconds needed to produce one ore.
 pub const ORE_SECONDS_PER_UNIT: f32 = 2.0;
 
 /// A single output slot holding one item type, bounded by that item's `stack_size`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputSlot {
     pub item: ResourceKind,
     pub count: u32,
@@ -44,7 +45,7 @@ impl OutputSlot {
 }
 
 /// Ore production state of a mine.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MineProduction {
     pub output: OutputSlot,
     /// Worked seconds accumulated towards the next ore.

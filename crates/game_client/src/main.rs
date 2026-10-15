@@ -3,6 +3,7 @@ mod bootstrap;
 mod camera;
 mod mesh;
 mod renderer;
+mod save;
 mod ui;
 
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use core_sim::{
 };
 use glam::{Mat4, Vec3, Vec4};
 use renderer::{AgentInstance, Renderer};
+use save::{SaveEnvelope, SaveMetadata, QUICK_SAVE_PATH};
 use ui::{GameUi, HudData, UiAction};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -164,17 +166,29 @@ struct App {
     renderer: Option<Renderer>,
     ui: Option<GameUi>,
     agent_instances: Vec<AgentInstance>,
+    save_metadata: SaveMetadata,
 }
 
 impl App {
-    fn new(world: World, building_defs: Vec<content::BuildingDef>, schedule: Schedule) -> Self {
+    fn new(
+        world: World,
+        building_defs: Vec<content::BuildingDef>,
+        schedule: Schedule,
+        buildings: Buildings,
+        jobs: Jobs,
+        save_metadata: SaveMetadata,
+    ) -> Self {
         let now = Instant::now();
         let selected_entities = world.selected_character().into_iter().collect();
+        let mut camera = Camera::default();
+        if let Some(point) = world.focus_points().first() {
+            camera.target = Vec3::new(point.x, point.y, point.z);
+        }
         Self {
             world,
             selected_entities,
-            buildings: Buildings::default(),
-            jobs: Jobs::new(),
+            buildings,
+            jobs,
             building_defs,
             schedule,
             build_mode: None,
@@ -186,7 +200,7 @@ impl App {
                 strength_mm: 1000,
                 slope_start: None,
             },
-            camera: Camera::default(),
+            camera,
             input: Input::default(),
             accumulator: 0.0,
             last: now,
@@ -199,7 +213,58 @@ impl App {
             renderer: None,
             ui: None,
             agent_instances: Vec::new(),
+            save_metadata,
         }
+    }
+
+    fn quick_save(&mut self) {
+        let save = SaveEnvelope::capture(
+            self.save_metadata.clone(),
+            &self.world,
+            &self.buildings,
+            &self.jobs,
+        );
+        match save::write_save(QUICK_SAVE_PATH, &save) {
+            Ok(()) => self.build_status = Some(format!("Saved to {QUICK_SAVE_PATH}.")),
+            Err(error) => {
+                eprintln!("{error}");
+                self.build_status = Some(format!("Save failed: {error}"));
+            }
+        }
+    }
+
+    fn quick_load(&mut self) {
+        let envelope = match save::read_save(QUICK_SAVE_PATH) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                self.build_status = Some(format!("Load failed: {error}"));
+                return;
+            }
+        };
+        let differences = envelope.metadata.differences(&self.save_metadata);
+        if !differences.is_empty() {
+            self.build_status = Some(format!(
+                "Load failed: save composition is incompatible: {}",
+                differences.join("; ")
+            ));
+            return;
+        }
+        let world = match World::from_snapshot(envelope.world) {
+            Ok(world) => world,
+            Err(error) => {
+                self.build_status = Some(format!("Load failed: invalid world snapshot: {error}"));
+                return;
+            }
+        };
+        if let Some(point) = world.focus_points().first() {
+            self.camera.target = Vec3::new(point.x, point.y, point.z);
+        }
+        self.world = world;
+        self.buildings = envelope.buildings;
+        self.jobs = envelope.jobs;
+        self.selected_entities = self.world.selected_character().into_iter().collect();
+        self.accumulator = 0.0;
+        self.build_status = Some(format!("Loaded from {QUICK_SAVE_PATH}."));
     }
 
     /// Queue the active terrain tool at lattice point `at`, unless it would leave an
@@ -703,6 +768,8 @@ impl ApplicationHandler for App {
                             self.editor.slope_start = None;
                             self.build_status = Some(self.editor.status());
                         }
+                        KeyCode::F5 if down => self.quick_save(),
+                        KeyCode::F9 if down => self.quick_load(),
                         KeyCode::BracketLeft | KeyCode::BracketRight
                             if down && self.editor.active =>
                         {
@@ -859,14 +926,23 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    let startup = bootstrap::bootstrap(
+    let startup = bootstrap::bootstrap_with_load(
         &assets::root(),
         std::env::var("ASHEN_SCENARIO").ok().as_deref(),
+        std::env::var("ASHEN_LOAD").ok().as_deref(),
     );
     println!("{}", startup.summary);
-    let (config, building_defs, schedule) =
-        (startup.config, startup.building_defs, startup.schedule);
-    let world = World::generate(&config);
+    let save_metadata = SaveMetadata::from_summary(&startup.summary);
+    let (config, building_defs, schedule, loaded_state) = (
+        startup.config,
+        startup.building_defs,
+        startup.schedule,
+        startup.loaded_state,
+    );
+    let (world, buildings, jobs) = match loaded_state {
+        Some(state) => (state.world, state.buildings, state.jobs),
+        None => (World::generate(&config), Buildings::default(), Jobs::new()),
+    };
     let event_loop = match EventLoop::new() {
         Ok(l) => l,
         Err(e) => {
@@ -875,7 +951,14 @@ fn main() {
         }
     };
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(world, building_defs, schedule);
+    let mut app = App::new(
+        world,
+        building_defs,
+        schedule,
+        buildings,
+        jobs,
+        save_metadata,
+    );
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop error: {e}");
     }
