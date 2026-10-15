@@ -71,6 +71,7 @@
         output_resources: [
             "iron_ingot",
         ],
+        smelter: true,
         cost: {
             "wood": 40.0,
             "iron": 10.0,

@@ -46,6 +46,9 @@ pub struct BuildingDef {
     /// Whether this building mines ore into its output slot while worked.
     #[serde(default)]
     pub mine: bool,
+    /// Whether this building smelts iron ore into iron ingots while worked.
+    #[serde(default)]
+    pub smelter: bool,
     /// Whether residents can live here.
     #[serde(default)]
     pub dwelling: bool,

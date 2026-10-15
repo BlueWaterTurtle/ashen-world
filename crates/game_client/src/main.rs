@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use camera::Camera;
 use core_sim::{
-    BuildingLogistics, Buildings, Footprint, Job, Jobs, PlacementRules, Schedule, TerrainEdit,
-    WorkerActivity, World, WorldPos, TICK_DT,
+    BuildingLogistics, Buildings, Footprint, Job, Jobs, PlacementRules, ResourceKind, Schedule,
+    TerrainEdit, WorkerActivity, World, WorldPos, TICK_DT,
 };
 use glam::{Mat4, Vec3, Vec4};
 use renderer::{AgentInstance, Renderer};
@@ -389,6 +389,7 @@ impl App {
                 output_resources: definition.output_resources.clone(),
                 is_storage: definition.storage,
                 is_mine: definition.mine,
+                is_smelter: definition.smelter,
                 required_inputs: definition.required_inputs.clone(),
             };
             match self.buildings.place_with_logistics(
@@ -502,6 +503,16 @@ impl App {
                 }
                 UiAction::AddJob { worker, building } => {
                     self.jobs.add_job(worker, Job::Work { building });
+                }
+                UiAction::AddHaul { worker, from, to } => {
+                    self.jobs.add_job(
+                        worker,
+                        Job::Haul {
+                            from,
+                            to,
+                            item: ResourceKind::IronOre,
+                        },
+                    );
                 }
                 UiAction::RemoveJob { worker, index } => {
                     self.jobs

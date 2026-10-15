@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 /// Worked seconds needed to produce one ore.
 pub const ORE_SECONDS_PER_UNIT: f32 = 2.0;
 
+/// Worked seconds needed to smelt one iron ore into one iron ingot.
+pub const SMELT_SECONDS_PER_INGOT: f32 = 3.0;
+
 /// A single output slot holding one item type, bounded by that item's `stack_size`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputSlot {
@@ -82,6 +85,13 @@ impl MineProduction {
         }
         inserted
     }
+}
+
+/// Smelting state of a workshop: a delta-time progress accumulator.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SmeltProduction {
+    /// Worked seconds accumulated towards the next ingot.
+    pub progress: f32,
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use core_sim::{
-    fertility_at, resource_richness_at, Buildings, Entity, Job, JobStatus, Jobs, WorkStatus, World,
-    RECRUIT_MAX_DISTANCE,
+    fertility_at, resource_richness_at, Buildings, Entity, Job, JobStatus, Jobs, ResourceKind,
+    WorkStatus, World, RECRUIT_MAX_DISTANCE,
 };
 use egui::{ClippedPrimitive, Color32, Id, LayerId, Order, Pos2, Stroke, TexturesDelta};
 use glam::{Mat4, Vec3};
@@ -14,10 +14,27 @@ pub enum UiAction {
     Recruit(Entity),
     SelectBuilding(String),
     CancelBuilding,
-    AddJob { worker: Entity, building: usize },
-    RemoveJob { worker: Entity, index: usize },
-    MoveJobUp { worker: Entity, index: usize },
-    MoveJobDown { worker: Entity, index: usize },
+    AddJob {
+        worker: Entity,
+        building: usize,
+    },
+    AddHaul {
+        worker: Entity,
+        from: usize,
+        to: usize,
+    },
+    RemoveJob {
+        worker: Entity,
+        index: usize,
+    },
+    MoveJobUp {
+        worker: Entity,
+        index: usize,
+    },
+    MoveJobDown {
+        worker: Entity,
+        index: usize,
+    },
     ResumeJobs(Entity),
 }
 
@@ -495,6 +512,7 @@ fn status_text(status: JobStatus) -> &'static str {
         JobStatus::NoFreeSlot => "no free worker slot",
         JobStatus::Queued => "waiting (higher priority first)",
         JobStatus::Suspended => "suspended",
+        JobStatus::Hauling => "hauling",
         JobStatus::Invalid => "building missing",
     }
 }
@@ -520,13 +538,17 @@ fn job_panel(
         }
     }
     for (index, job) in list.iter().enumerate() {
-        let Job::Work { building } = *job;
+        let label = match *job {
+            Job::Work { building } => building_label(buildings, defs, building),
+            Job::Haul { from, to, item } => format!(
+                "Haul {}: {} -> {}",
+                item.id(),
+                building_label(buildings, defs, from),
+                building_label(buildings, defs, to)
+            ),
+        };
         ui.horizontal(|ui| {
-            ui.label(format!(
-                "{}. {}",
-                index + 1,
-                building_label(buildings, defs, building)
-            ));
+            ui.label(format!("{}. {}", index + 1, label));
             if let Some(status) = jobs.job_status(worker, index, buildings) {
                 ui.small(status_text(status));
             }
@@ -563,5 +585,51 @@ fn job_panel(
                     }
                 }
             });
+    }
+    let ore = ResourceKind::IronOre.id();
+    let hauls: Vec<(usize, usize)> = (0..buildings.buildings.len())
+        .flat_map(|from| (0..buildings.buildings.len()).map(move |to| (from, to)))
+        .filter(|&(from, to)| {
+            from != to
+                && buildings.buildings[from].outputs.allows(ore)
+                && buildings.buildings[to].inputs.allows(ore)
+                && !list.contains(&Job::Haul {
+                    from,
+                    to,
+                    item: ResourceKind::IronOre,
+                })
+        })
+        .collect();
+    if !hauls.is_empty() {
+        egui::ComboBox::from_id_salt("add_haul")
+            .selected_text("Add haul iron ore…")
+            .show_ui(ui, |ui| {
+                for (from, to) in hauls {
+                    let label = format!(
+                        "{} -> {}",
+                        building_label(buildings, defs, from),
+                        building_label(buildings, defs, to)
+                    );
+                    if ui.selectable_label(false, label).clicked() {
+                        actions.push(UiAction::AddHaul { worker, from, to });
+                    }
+                }
+            });
+    }
+    for (i, b) in buildings.buildings.iter().enumerate() {
+        let stock = |inv: &core_sim::SlotInventory| {
+            inv.items()
+                .map(|s| format!("{} {}", s.item, s.count))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if b.inputs.items().next().is_some() || b.outputs.items().next().is_some() {
+            ui.small(format!(
+                "{}: in [{}] out [{}]",
+                building_label(buildings, defs, i),
+                stock(&b.inputs),
+                stock(&b.outputs)
+            ));
+        }
     }
 }

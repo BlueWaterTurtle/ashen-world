@@ -126,6 +126,15 @@ startup continues with a fresh world. Without `ASHEN_LOAD`, startup behavior is 
 play, **F5** writes `saves/quicksave.ron` and **F9** loads it when its composition matches the
 current startup. The default `saves/` directory is gitignored.
 
+## Production chain (mine -> haul -> smelt)
+
+A mine worked by a `Job::Work` worker moves ore into its output storage. A `Job::Haul { from, to, item }`
+worker carries up to `HAUL_CARRY` items from `from`'s output to `to`'s input (the carried stack
+lives in the worker inventory, so it is saved with the world). A building with `smelter: true`
+(the workshop) converts one `iron_ore` into one `iron_ingot` per `SMELT_SECONDS_PER_INGOT` worked
+seconds. All of it is stored in `Buildings`/`Jobs` and round-trips through save/load. The job panel
+shows haul jobs and per-building input/output stock.
+
 ## Adding a content domain
 
 1. Add `crates/content/src/domains/<name>.rs` with the type and a `ContentDomain` impl

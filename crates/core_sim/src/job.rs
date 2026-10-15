@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use crate::building::{Buildings, WorkStatus};
 use crate::chunk::WorldPos;
+use crate::resource::ResourceKind;
 use crate::world::{ControlError, Entity, World, TICKS_PER_SECOND};
 use serde::{Deserialize, Serialize};
 
@@ -16,12 +17,30 @@ use serde::{Deserialize, Serialize};
 pub const JOB_CHECK_INTERVAL_TICKS: u64 = (TICKS_PER_SECOND / 2) as u64;
 /// Distance (meters) from the slot position within which a worker counts as working.
 const ARRIVE_RADIUS: f32 = 0.75;
+/// Most items a hauler carries per trip.
+pub const HAUL_CARRY: u32 = 10;
 
 /// Something a worker can be assigned to. Extend with new variants for new job kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Job {
     /// Staff a worker slot of the building at this index.
     Work { building: usize },
+    /// Carry `item` from the output of `from` to the input of `to`.
+    Haul {
+        from: usize,
+        to: usize,
+        item: ResourceKind,
+    },
+}
+
+impl Job {
+    /// The building this job is primarily about (the source for hauling).
+    pub fn building(&self) -> usize {
+        match *self {
+            Job::Work { building } => building,
+            Job::Haul { from, .. } => from,
+        }
+    }
 }
 
 /// What a worker is doing right now; drives the (placeholder) work animation.
@@ -46,8 +65,16 @@ pub enum JobStatus {
     Queued,
     /// Jobs are suspended after an explicit player move.
     Suspended,
+    /// Carrying items between buildings.
+    Hauling,
     /// Building no longer exists.
     Invalid,
+}
+
+enum Chosen {
+    Work(usize),
+    /// Index of the haul job in the worker's list.
+    Haul(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +89,9 @@ struct WorkerJobs {
     jobs: Vec<Job>,
     suspended: bool,
     active: Option<ActiveWork>,
+    /// Index into `jobs` of the haul job being carried out, if any.
+    #[serde(default)]
+    hauling: Option<usize>,
 }
 
 /// Job lists for all workers. Iteration order is by entity for determinism.
@@ -103,9 +133,13 @@ impl Jobs {
             return;
         }
         let removed = entry.jobs.remove(index);
-        let Job::Work { building } = removed;
-        if entry.active.is_some_and(|a| a.building == building) {
-            Self::release(worker, entry, buildings, world);
+        entry.hauling = None;
+        if let Job::Work { building } = removed {
+            if entry.active.is_some_and(|a| a.building == building) {
+                Self::release(worker, entry, buildings, world);
+            }
+        } else if entry.active.is_none() {
+            world.set_held(worker, false);
         }
     }
 
@@ -153,10 +187,26 @@ impl Jobs {
         buildings: &Buildings,
     ) -> Option<JobStatus> {
         let entry = self.workers.get(&worker)?;
-        let Job::Work { building } = *entry.jobs.get(index)?;
+        let job = *entry.jobs.get(index)?;
         if entry.suspended {
             return Some(JobStatus::Suspended);
         }
+        let building = match job {
+            Job::Work { building } => building,
+            Job::Haul { from, to, item } => {
+                if buildings.buildings.get(from).is_none() || buildings.buildings.get(to).is_none()
+                {
+                    return Some(JobStatus::Invalid);
+                }
+                return Some(if entry.hauling == Some(index) {
+                    JobStatus::Hauling
+                } else if buildings.can_haul(from, to, item.id()) {
+                    JobStatus::Queued
+                } else {
+                    JobStatus::Blocked(WorkStatus::MissingInput)
+                });
+            }
+        };
         let Some(b) = buildings.buildings.get(building) else {
             return Some(JobStatus::Invalid);
         };
@@ -189,6 +239,7 @@ impl Jobs {
             if entry.active.is_some() || !entry.jobs.is_empty() {
                 entry.suspended = true;
             }
+            entry.hauling = None;
             Self::release(worker, entry, buildings, world);
         }
         world.command_move(worker, goal)
@@ -211,19 +262,71 @@ impl Jobs {
         });
         for (&worker, entry) in self.workers.iter_mut() {
             if entry.suspended {
+                entry.hauling = None;
                 Self::release(worker, entry, buildings, world);
                 continue;
             }
-            let chosen = entry.jobs.iter().find_map(|job| {
-                let Job::Work { building } = *job;
-                let b = buildings.buildings.get(building)?;
-                let ours = entry.active.is_some_and(|a| a.building == building);
-                (b.work_status() == WorkStatus::Ready && (ours || b.has_free_worker_slot()))
-                    .then_some(building)
-            });
+            let chosen = entry
+                .jobs
+                .iter()
+                .enumerate()
+                .find_map(|(index, job)| match *job {
+                    Job::Work { building } => {
+                        let b = buildings.buildings.get(building)?;
+                        let ours = entry.active.is_some_and(|a| a.building == building);
+                        (b.work_status() == WorkStatus::Ready && (ours || b.has_free_worker_slot()))
+                            .then_some(Chosen::Work(building))
+                    }
+                    Job::Haul { from, to, item } => {
+                        buildings.buildings.get(to)?;
+                        let carrying = world
+                            .inventory(worker)
+                            .is_some_and(|inv| inv.count_of(item.id()) > 0);
+                        (carrying || buildings.can_haul(from, to, item.id()))
+                            .then_some(Chosen::Haul(index))
+                    }
+                });
             match chosen {
-                None => Self::release(worker, entry, buildings, world),
-                Some(building) => {
+                None => {
+                    entry.hauling = None;
+                    Self::release(worker, entry, buildings, world);
+                }
+                Some(Chosen::Haul(index)) => {
+                    if entry.active.is_some() {
+                        Self::release(worker, entry, buildings, world);
+                    }
+                    entry.hauling = Some(index);
+                    world.set_held(worker, true);
+                    let Job::Haul { from, to, item } = entry.jobs[index] else {
+                        continue;
+                    };
+                    let carrying = world
+                        .inventory(worker)
+                        .is_some_and(|inv| inv.count_of(item.id()) > 0);
+                    let stop = if carrying { to } else { from };
+                    let target = buildings.buildings[stop].worker_slot_position(0);
+                    let p = world.position(worker);
+                    let dist = ((p.x - target.x).powi(2) + (p.z - target.z).powi(2)).sqrt();
+                    if dist <= ARRIVE_RADIUS {
+                        if let Some(mut inventory) = world.inventory_mut(worker) {
+                            let _ = if carrying {
+                                buildings.haul_drop(to, &mut inventory, item.id())
+                            } else {
+                                buildings.haul_pickup(
+                                    from,
+                                    to,
+                                    &mut inventory,
+                                    item.id(),
+                                    HAUL_CARRY,
+                                )
+                            };
+                        }
+                    } else if !world.is_navigating(worker) {
+                        world.navigate_to(worker, target);
+                    }
+                }
+                Some(Chosen::Work(building)) => {
+                    entry.hauling = None;
                     if entry.active.is_some_and(|a| a.building != building) {
                         Self::release(worker, entry, buildings, world);
                     }
@@ -277,6 +380,7 @@ impl Jobs {
 mod tests {
     use super::*;
     use crate::building::{BuildingLogistics, Footprint, PlacementRules};
+    use crate::resource::ResourceKind;
     use crate::world::WorldConfig;
 
     fn setup() -> (World, Buildings, Entity, usize, usize) {
@@ -430,5 +534,165 @@ mod tests {
             jobs.job_status(other, 0, &buildings),
             Some(JobStatus::NoFreeSlot)
         );
+    }
+
+    /// Mine (building 0) -> haul -> workshop (building 1) -> ingots in the workshop output.
+    fn chain_setup() -> (World, Buildings, Jobs, Entity, Entity) {
+        let world = World::generate(&WorldConfig {
+            agent_count: 2,
+            ..Default::default()
+        });
+        let mut ids = world.entities();
+        let (miner, hauler) = (ids.next().unwrap(), ids.next().unwrap());
+        drop(ids);
+        let mut buildings = Buildings::default();
+        let rules = PlacementRules::default();
+        let mut place = |x: i32, def: &str, logistics: BuildingLogistics| {
+            buildings
+                .place_with_logistics(
+                    world.seed,
+                    world.terrain_edits(),
+                    def,
+                    Footprint {
+                        x,
+                        z: 0,
+                        width: 2,
+                        depth: 2,
+                    },
+                    &rules,
+                    logistics,
+                )
+                .unwrap()
+        };
+        place(
+            0,
+            "iron_mine",
+            BuildingLogistics {
+                worker_slots: 1,
+                output_slots: 2,
+                output_resources: vec!["iron_ore".into()],
+                is_mine: true,
+                ..Default::default()
+            },
+        );
+        place(
+            10,
+            "workshop",
+            BuildingLogistics {
+                worker_slots: 1,
+                input_slots: 2,
+                output_slots: 2,
+                input_resources: vec!["iron_ore".into()],
+                output_resources: vec!["iron_ingot".into()],
+                required_inputs: vec!["iron_ore".into()],
+                is_smelter: true,
+                ..Default::default()
+            },
+        );
+        let mut jobs = Jobs::new();
+        jobs.add_job(miner, Job::Work { building: 0 });
+        jobs.add_job(
+            hauler,
+            Job::Haul {
+                from: 0,
+                to: 1,
+                item: ResourceKind::IronOre,
+            },
+        );
+        (world, buildings, jobs, miner, hauler)
+    }
+
+    fn step(
+        world: &mut World,
+        buildings: &mut Buildings,
+        jobs: &mut Jobs,
+        at: [(Entity, usize); 2],
+    ) {
+        for (who, b) in at {
+            let p = buildings.buildings[b].worker_slot_position(0);
+            world.set_position(who, p);
+        }
+        world.tick = JOB_CHECK_INTERVAL_TICKS * (world.tick / JOB_CHECK_INTERVAL_TICKS + 1);
+        jobs.update(world, buildings);
+        buildings.tick_production(2.0);
+    }
+
+    #[test]
+    fn haul_moves_ore_and_workshop_smelts_ingots() {
+        let (mut world, mut buildings, mut jobs, miner, hauler) = chain_setup();
+        // Miner at the mine produces ore into its output.
+        for _ in 0..4 {
+            step(
+                &mut world,
+                &mut buildings,
+                &mut jobs,
+                [(miner, 0), (hauler, 1)],
+            );
+        }
+        let ore = buildings.buildings[0].outputs.count_of("iron_ore");
+        assert!(ore > 0);
+        // Hauler picks up at the mine, then drops at the workshop.
+        step(
+            &mut world,
+            &mut buildings,
+            &mut jobs,
+            [(miner, 0), (hauler, 0)],
+        );
+        assert_eq!(
+            jobs.job_status(hauler, 0, &buildings),
+            Some(JobStatus::Hauling)
+        );
+        assert!(world.inventory(hauler).unwrap().count_of("iron_ore") > 0);
+        step(
+            &mut world,
+            &mut buildings,
+            &mut jobs,
+            [(miner, 0), (hauler, 1)],
+        );
+        assert_eq!(world.inventory(hauler).unwrap().count_of("iron_ore"), 0);
+        assert!(buildings.buildings[1].inputs.count_of("iron_ore") > 0);
+        // A worker at the workshop turns ore into ingots.
+        jobs.add_job(miner, Job::Work { building: 1 });
+        let ingots_before = buildings.buildings[1].outputs.count_of("iron_ingot");
+        let ore_before = buildings.buildings[1].inputs.count_of("iron_ore");
+        // Miner's mine is top priority; make the workshop first.
+        jobs.move_up(miner, 1);
+        for _ in 0..3 {
+            step(
+                &mut world,
+                &mut buildings,
+                &mut jobs,
+                [(miner, 1), (hauler, 1)],
+            );
+        }
+        assert!(buildings.buildings[1].outputs.count_of("iron_ingot") > ingots_before);
+        assert!(buildings.buildings[1].inputs.count_of("iron_ore") < ore_before);
+    }
+
+    #[test]
+    fn chain_is_deterministic_across_clone_and_serde_state() {
+        let (mut world, mut buildings, mut jobs, miner, hauler) = chain_setup();
+        for _ in 0..6 {
+            step(
+                &mut world,
+                &mut buildings,
+                &mut jobs,
+                [(miner, 0), (hauler, 0)],
+            );
+        }
+        let mut b2 = buildings.clone();
+        let mut j2 = jobs.clone();
+        let snapshot = world.snapshot();
+        let mut w2 = World::from_snapshot(snapshot).expect("restore");
+        for _ in 0..6 {
+            step(
+                &mut world,
+                &mut buildings,
+                &mut jobs,
+                [(miner, 1), (hauler, 1)],
+            );
+            step(&mut w2, &mut b2, &mut j2, [(miner, 1), (hauler, 1)]);
+        }
+        assert_eq!(buildings.buildings, b2.buildings);
     }
 }
