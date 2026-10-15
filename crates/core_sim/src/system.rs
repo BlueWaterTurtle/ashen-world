@@ -28,6 +28,33 @@ impl Schedule {
         s
     }
 
+    /// Build a schedule from system names, in order. Returns the schedule and any names that
+    /// are not registered (those are skipped).
+    pub fn from_names<S: AsRef<str>>(names: &[S]) -> (Self, Vec<String>) {
+        let mut schedule = Self::new();
+        let mut unknown = Vec::new();
+        for name in names {
+            match name.as_ref() {
+                "core_step" => {
+                    schedule.add(CoreStepSystem);
+                }
+                other => unknown.push(other.to_string()),
+            }
+        }
+        (schedule, unknown)
+    }
+
+    /// Like [`Schedule::from_names`], but falls back to [`Schedule::standard`] when no
+    /// listed system is known.
+    pub fn from_names_or_standard<S: AsRef<str>>(names: &[S]) -> (Self, Vec<String>) {
+        let (schedule, unknown) = Self::from_names(names);
+        if schedule.systems.is_empty() {
+            (Self::standard(), unknown)
+        } else {
+            (schedule, unknown)
+        }
+    }
+
     pub fn add(&mut self, system: impl SimSystem + 'static) -> &mut Self {
         self.systems.push(Box::new(system));
         self
@@ -85,6 +112,23 @@ mod tests {
         }
         assert_eq!(a.tick, b.tick);
         assert_eq!(schedule.system_names(), vec!["core_step"]);
+    }
+
+    #[test]
+    fn from_names_builds_in_order_and_reports_unknown() {
+        let (s, unknown) = Schedule::from_names(&["core_step", "nope", "core_step"]);
+        assert_eq!(s.system_names(), vec!["core_step", "core_step"]);
+        assert_eq!(unknown, vec!["nope"]);
+    }
+
+    #[test]
+    fn empty_or_unknown_names_fall_back_to_standard() {
+        let none: [&str; 0] = [];
+        let (s, _) = Schedule::from_names_or_standard(&none);
+        assert_eq!(s.system_names(), vec!["core_step"]);
+        let (s, unknown) = Schedule::from_names_or_standard(&["bogus"]);
+        assert_eq!(s.system_names(), vec!["core_step"]);
+        assert_eq!(unknown, vec!["bogus"]);
     }
 
     #[test]

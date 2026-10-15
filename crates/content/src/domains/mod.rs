@@ -56,21 +56,32 @@ pub trait ContentDomain: serde::de::DeserializeOwned {
 
 /// Ids known per domain [`ContentDomain::KIND`], used to resolve declared references.
 #[derive(Default)]
-pub struct KnownIds<'a>(BTreeMap<&'static str, HashSet<&'a str>>);
+pub struct KnownIds<'a> {
+    ids: BTreeMap<&'static str, HashSet<&'a str>>,
+    unchecked: HashSet<&'static str>,
+}
 
 impl<'a> KnownIds<'a> {
     pub fn register<T: ContentDomain>(&mut self, items: &'a [T]) {
-        self.0
+        self.ids
             .entry(T::KIND)
             .or_default()
             .extend(items.iter().map(|i| i.id()));
+    }
+
+    /// Skip references to `kind` (its domain is disabled in the manifest, so ids are unknown).
+    pub fn mark_unchecked(&mut self, kind: &'static str) {
+        self.unchecked.insert(kind);
     }
 
     /// Check every declared reference of `items`; returns the first dangling one as a message.
     pub fn check_references<T: ContentDomain>(&self, items: &[T]) -> Result<(), String> {
         for item in items {
             for r in item.references() {
-                if !self.0.get(r.target).is_some_and(|ids| ids.contains(r.id)) {
+                if self.unchecked.contains(r.target) {
+                    continue;
+                }
+                if !self.ids.get(r.target).is_some_and(|ids| ids.contains(r.id)) {
                     return Err(format!(
                         "{} '{}' references unknown {} '{}'",
                         T::KIND,

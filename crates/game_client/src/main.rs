@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use camera::Camera;
 use core_sim::{
-    Behavior, BuildingLogistics, Buildings, Footprint, Job, Jobs, PlacementRules, TerrainEdit,
-    WorkerActivity, World, WorldConfig, WorldPos, TICK_DT,
+    Behavior, BuildingLogistics, Buildings, Footprint, Job, Jobs, PlacementRules, Schedule,
+    TerrainEdit, WorkerActivity, World, WorldConfig, WorldPos, TICK_DT,
 };
 use glam::{Mat4, Vec3, Vec4};
 use renderer::{AgentInstance, Renderer};
@@ -150,6 +150,7 @@ struct App {
     buildings: Buildings,
     jobs: Jobs,
     building_defs: Vec<content::BuildingDef>,
+    schedule: Schedule,
     build_mode: Option<String>,
     build_status: Option<String>,
     editor: TerrainEditor,
@@ -165,7 +166,7 @@ struct App {
 }
 
 impl App {
-    fn new(world: World, building_defs: Vec<content::BuildingDef>) -> Self {
+    fn new(world: World, building_defs: Vec<content::BuildingDef>, schedule: Schedule) -> Self {
         let now = Instant::now();
         let selected_entities = world.selected_character().into_iter().collect();
         Self {
@@ -174,6 +175,7 @@ impl App {
             buildings: Buildings::default(),
             jobs: Jobs::new(),
             building_defs,
+            schedule,
             build_mode: None,
             build_status: None,
             editor: TerrainEditor {
@@ -457,7 +459,7 @@ impl App {
         self.last = now;
         self.accumulator += dt.as_secs_f32();
         while self.accumulator >= TICK_DT {
-            self.world.step();
+            self.schedule.run(&mut self.world);
             self.jobs.update(&mut self.world, &mut self.buildings);
             self.buildings.tick_production(TICK_DT);
             self.accumulator -= TICK_DT;
@@ -883,7 +885,17 @@ fn behaviors_from_content(c: &content::Content) -> Vec<Behavior> {
 
 fn main() {
     let content_dir = assets::root().join("content");
-    let (config, building_defs) = match content::load_content(&content_dir) {
+    let (manifest, manifest_err) =
+        content::Manifest::load_or_default(content_dir.join("manifest.ron"));
+    if let Some(e) = manifest_err {
+        eprintln!("manifest: {e}; using default composition");
+    }
+    let (schedule, unknown) = Schedule::from_names_or_standard(&manifest.systems);
+    for name in unknown {
+        eprintln!("manifest: unknown system '{name}' ignored");
+    }
+    println!("systems: {}", schedule.system_names().join(", "));
+    let (config, building_defs) = match content::load_content_with(&content_dir, &manifest) {
         Ok(c) => {
             println!(
                 "content: {} factions, {} units, {} biomes, {} races, {} behaviors, {} buildings, {} crops",
@@ -917,7 +929,7 @@ fn main() {
         }
     };
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(world, building_defs);
+    let mut app = App::new(world, building_defs, schedule);
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop error: {e}");
     }
