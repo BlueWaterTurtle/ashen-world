@@ -1,0 +1,9 @@
+(
+    name: "Small World",
+    description: "A quiet start with few agents and a different seed.",
+    world: (
+        seed: Some(42),
+        agent_count: Some(50),
+        chunk_radius: Some(1),
+    ),
+)

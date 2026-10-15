@@ -1,0 +1,16 @@
+// Default scenario: reproduces the built-in game. All fields are optional.
+// Select another with ASHEN_SCENARIO=<name> (assets/scenarios/<name>.ron) or a path to a .ron file.
+(
+    name: "Default",
+    description: "The standard Ashen World start.",
+    // manifest: Some("manifest.ron"),   // manifest path relative to assets/content
+    // content_domains: Some([...]),     // inline override of the manifest's domains
+    // systems: Some(["core_step"]),     // inline override of the manifest's systems
+    world: (
+        // seed: Some(1),
+        // agent_count: Some(1000),
+        // chunk_radius: Some(2),
+        // max_path_requests_per_tick: Some(8),
+        // starting_player_characters: Some(1),
+    ),
+)

@@ -13,12 +13,14 @@ pub mod cache;
 pub mod domains;
 pub mod manifest;
 pub mod registry;
+pub mod scenario;
 
 pub use domains::{
     effective_stat, Behavior, Biome, BuildingDef, ContentDomain, Crop, Faction, KnownIds, Race,
     Reference, StatModifier, UnitArchetype,
 };
 pub use manifest::Manifest;
+pub use scenario::{Scenario, WorldOverrides};
 
 #[derive(Debug)]
 pub enum ContentError {

@@ -52,6 +52,21 @@ game_client ──► asset_pipeline
 
 To disable a domain or system, remove its name from the manifest. Add one by following below.
 
+## Scenarios (game modes)
+
+A scenario (`assets/scenarios/<name>.ron`, parsed by `content::Scenario`) sits on top of the
+manifest. All fields are optional: `name`, `description`, `manifest` (file relative to
+`assets/content`, default `manifest.ron`), inline `content_domains` / `systems` overrides, and
+`world` startup overrides (`seed`, `agent_count`, `chunk_radius`, `max_path_requests_per_tick`,
+`starting_player_characters`).
+
+At startup `game_client` loads `assets/scenarios/default.ron`, or the scenario named by the
+`ASHEN_SCENARIO` environment variable (a name, or a path to a `.ron` file). The scenario resolves
+the effective manifest (manifest file, then inline overrides) which drives content and schedule
+composition as above; `world` overrides are then applied to `WorldConfig`. If the scenario is
+missing or invalid a warning is printed and the built-in default (no overrides) is used, so the
+default scenario reproduces the original behavior. Example: `ASHEN_SCENARIO=small_world`.
+
 ## Adding a content domain
 
 1. Add `crates/content/src/domains/<name>.rs` with the type and a `ContentDomain` impl
