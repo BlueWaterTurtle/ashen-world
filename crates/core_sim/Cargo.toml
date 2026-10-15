@@ -6,3 +6,4 @@ publish.workspace = true
 
 [dependencies]
 hecs = "0.10"
+serde.workspace = true

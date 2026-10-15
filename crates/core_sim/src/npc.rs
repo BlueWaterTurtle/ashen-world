@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::chunk::WorldPos;
+use serde::{Deserialize, Serialize};
 
 /// Stable, persistent identifier for an NPC. Survives across distance and despawn/resume.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct NpcId(pub u64);
 
 impl fmt::Display for NpcId {
@@ -14,7 +15,7 @@ impl fmt::Display for NpcId {
 }
 
 /// Category of entity in the simulation world.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum EntityKind {
     /// Persistent NPC whose identity, skills, and inventory persist across distance and tiers.
     #[default]
@@ -24,7 +25,7 @@ pub enum EntityKind {
 }
 
 /// Persistent skill progression for an NPC.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Skills {
     levels: BTreeMap<String, u32>,
 }
@@ -56,7 +57,7 @@ impl Skills {
 }
 
 /// A stack of items in an inventory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemStack {
     pub item: String,
     pub count: u32,
@@ -72,7 +73,7 @@ impl ItemStack {
 }
 
 /// Persistent inventory holding items for an NPC.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Inventory {
     items: Vec<ItemStack>,
 }
@@ -136,7 +137,7 @@ impl Inventory {
 ///
 /// Distinguishes full per-tick simulation from cheaper throttled simulation and
 /// coarse background persistence, while keeping rendering decisions independent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub enum SimulationTier {
     /// Full movement, pathfinding, and behavior updates every simulation tick.
     /// Rendered when visible. Used for player characters, squad members, and nearby NPCs.
@@ -207,7 +208,7 @@ impl SimulationTier {
 }
 
 /// Configuration for simulation LOD tiering.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LodConfig {
     /// Whether simulation LOD tiering is active.
     pub enabled: bool,
@@ -258,11 +259,11 @@ impl LodConfig {
 }
 
 /// Target destination for navigation or abstract movement.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct NavGoal(pub Option<WorldPos>);
 
 /// A complete snapshot of a persistent NPC, suitable for long-term storage or despawn/resume.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistentNpcRecord {
     pub id: NpcId,
     pub kind: EntityKind,

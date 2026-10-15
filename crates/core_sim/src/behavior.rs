@@ -1,8 +1,9 @@
 use crate::world::TICKS_PER_SECOND;
+use serde::{Deserialize, Serialize};
 
 /// Simulation-side movement behaviour parameters. Plain data so the sim stays free of
 /// content-loading dependencies; the client maps content definitions into this.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Behavior {
     /// Wander destinations are within this many cells (per axis). 0 = stay put.
     pub wander_range: i32,

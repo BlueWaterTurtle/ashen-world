@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use serde::{Deserialize, Serialize};
 
 use crate::behavior::Behavior;
 use crate::chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
@@ -16,29 +17,29 @@ pub const TICKS_PER_SECOND: u32 = 30;
 pub const TICK_DT: f32 = 1.0 / TICKS_PER_SECOND as f32;
 
 /// Opaque, stable handle to an agent: its spawn index. Spawn order is deterministic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Entity(pub u32);
 
 /// Components stored in the ECS. Every agent always has all of them, so all agents live
 /// in one archetype and iteration order equals spawn order (needed for determinism).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct Position(pub WorldPos);
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct Velocity(pub WorldPos);
 /// Remaining waypoints (cell coordinates, in order); `None` when idle.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Path(pub Option<VecDeque<Cell>>);
 /// Index into [`World::behaviors`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BehaviorId(pub usize);
 /// Ticks remaining before an idle agent may pick a new destination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Pause(pub u32);
 /// Whether this agent is currently controlled by the player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PlayerControlled(pub bool);
 /// Whether an agent may be recruited into player control.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Recruitable(pub bool);
 
 /// Maximum distance (in meters) for character-to-character recruitment.
@@ -153,6 +154,34 @@ pub struct World {
     pub focus_points: Vec<WorldPos>,
 }
 
+/// Serializable deterministic state needed to restore a [`World`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldSnapshot {
+    pub seed: u64,
+    pub tick: u64,
+    pub behaviors: Vec<Behavior>,
+    pub max_path_requests_per_tick: usize,
+    pub rng: Rng,
+    pub terrain_edits: Vec<((i32, i32), i32)>,
+    pub pending_terrain_edits: Vec<TerrainEdit>,
+    pub agents: Vec<AgentSnapshot>,
+    pub agent_slots: usize,
+    pub wander_queue: VecDeque<u32>,
+    pub wander_queued: Vec<bool>,
+    pub held: std::collections::BTreeSet<u32>,
+    pub selected_player_character: Option<Entity>,
+    pub lod: LodConfig,
+    pub focus_points: Vec<WorldPos>,
+}
+
+/// Runtime state for one live agent, in ECS iteration order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentSnapshot {
+    pub entity: Entity,
+    pub record: PersistentNpcRecord,
+    pub path: Option<VecDeque<Cell>>,
+}
+
 /// Maximum A* node expansions per path request.
 pub const PATH_BUDGET: usize = 20_000;
 /// Pause ticks applied to an agent when a wander path request fails.
@@ -242,6 +271,154 @@ impl World {
             world.update_simulation_tiers();
         }
         world
+    }
+
+    /// Capture all simulation state that can affect future ticks. Terrain generation and
+    /// pathfinding caches are derived and intentionally omitted.
+    pub fn snapshot(&self) -> WorldSnapshot {
+        let mut agents = Vec::with_capacity(self.entity_count());
+        for (_, (entity, position, velocity, path, behavior_id, pause, player_controlled,
+            recruitable, npc_id, kind, tier, skills, inventory, nav_goal)) in self
+            .ecs
+            .query::<(
+                &Entity,
+                &Position,
+                &Velocity,
+                &Path,
+                &BehaviorId,
+                &Pause,
+                &PlayerControlled,
+                &Recruitable,
+                &NpcId,
+                &EntityKind,
+                &SimTier,
+                &Skills,
+                &Inventory,
+                &NavGoal,
+            )>()
+            .iter()
+        {
+            agents.push(AgentSnapshot {
+                entity: *entity,
+                record: PersistentNpcRecord {
+                    id: *npc_id,
+                    kind: *kind,
+                    position: position.0,
+                    velocity: velocity.0,
+                    goal: nav_goal.0,
+                    behavior_id: behavior_id.0,
+                    pause_ticks: pause.0,
+                    player_controlled: player_controlled.0,
+                    recruitable: recruitable.0,
+                    tier: *tier,
+                    skills: skills.clone(),
+                    inventory: inventory.clone(),
+                },
+                path: path.0.clone(),
+            });
+        }
+        WorldSnapshot {
+            seed: self.seed,
+            tick: self.tick,
+            behaviors: self.behaviors.clone(),
+            max_path_requests_per_tick: self.max_path_requests_per_tick,
+            rng: self.rng.clone(),
+            terrain_edits: self.terrain_edits.entries().collect(),
+            pending_terrain_edits: self.pending_terrain_edits.iter().copied().collect(),
+            agents,
+            agent_slots: self.ids.len(),
+            wander_queue: self.wander_queue.clone(),
+            wander_queued: self.wander_queued.clone(),
+            held: self.held.clone(),
+            selected_player_character: self.selected_player_character,
+            lod: self.lod.clone(),
+            focus_points: self.focus_points.clone(),
+        }
+    }
+
+    /// Restore a world snapshot, rejecting malformed entity references rather than panicking.
+    pub fn from_snapshot(snapshot: WorldSnapshot) -> Result<Self, String> {
+        if snapshot.behaviors.is_empty() {
+            return Err("world snapshot has no behaviors".into());
+        }
+        if snapshot.wander_queued.len() != snapshot.agent_slots {
+            return Err("world snapshot has an invalid wander queue size".into());
+        }
+        if snapshot
+            .wander_queue
+            .iter()
+            .any(|&entity| entity as usize >= snapshot.agent_slots)
+            || snapshot
+                .held
+                .iter()
+                .any(|&entity| entity as usize >= snapshot.agent_slots)
+        {
+            return Err("world snapshot contains an out-of-range agent reference".into());
+        }
+
+        let mut ids = vec![hecs::Entity::DANGLING; snapshot.agent_slots];
+        let mut present = vec![false; snapshot.agent_slots];
+        let mut ecs = hecs::World::new();
+        for agent in &snapshot.agents {
+            let index = agent.entity.0 as usize;
+            if index >= snapshot.agent_slots || present[index] {
+                return Err("world snapshot contains an invalid or duplicate agent id".into());
+            }
+            let record = &agent.record;
+            if record.behavior_id >= snapshot.behaviors.len() {
+                return Err(format!(
+                    "world snapshot agent {} has an invalid behavior id",
+                    agent.entity.0
+                ));
+            }
+            let hecs_id = ecs.spawn((
+                agent.entity,
+                Position(record.position),
+                Velocity(record.velocity),
+                Path(agent.path.clone()),
+                BehaviorId(record.behavior_id),
+                Pause(record.pause_ticks),
+                PlayerControlled(record.player_controlled),
+                Recruitable(record.recruitable),
+                record.id,
+                record.kind,
+                record.tier,
+                record.skills.clone(),
+                record.inventory.clone(),
+                NavGoal(record.goal),
+            ));
+            ids[index] = hecs_id;
+            present[index] = true;
+        }
+        if let Some(selected) = snapshot.selected_player_character {
+            if !present.get(selected.0 as usize).copied().unwrap_or(false)
+                || !snapshot.agents.iter().any(|agent| {
+                    agent.entity == selected && agent.record.player_controlled
+                })
+            {
+                return Err("world snapshot has an invalid selected player character".into());
+            }
+        }
+
+        Ok(Self {
+            seed: snapshot.seed,
+            tick: snapshot.tick,
+            ecs,
+            ids,
+            behaviors: snapshot.behaviors,
+            max_path_requests_per_tick: snapshot.max_path_requests_per_tick,
+            rng: snapshot.rng,
+            walkability_cache: WalkabilityCache::default(),
+            terrain_edits: TerrainEdits::from_entries(snapshot.terrain_edits),
+            pending_terrain_edits: snapshot.pending_terrain_edits.into(),
+            pathfinder: Pathfinder::new(),
+            wander_queue: snapshot.wander_queue,
+            wander_queued: snapshot.wander_queued,
+            held: snapshot.held,
+            selected_player_character: snapshot.selected_player_character,
+            lod: snapshot.lod,
+            focus_points: snapshot.focus_points,
+        })
     }
 
     pub fn is_alive(&self, e: Entity) -> bool {
@@ -1289,6 +1466,48 @@ mod tests {
             snapshot(&World::generate(&cfg(42))),
             snapshot(&World::generate(&cfg(43)))
         );
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_state_and_future_ticks() {
+        let config = WorldConfig {
+            seed: 71,
+            agent_count: 12,
+            ..Default::default()
+        };
+        let mut uninterrupted = World::generate(&config);
+        uninterrupted.run_ticks(37);
+        uninterrupted.queue_terrain_edit(TerrainEdit::Raise {
+            center: (12, -8),
+            radius: 4,
+            amount_mm: 1700,
+        });
+        uninterrupted.run_ticks(1);
+        uninterrupted.queue_terrain_edit(TerrainEdit::Flatten {
+            center: (3, 7),
+            radius: 2,
+            target_mm: 10_000,
+        });
+        uninterrupted.skills_mut(Entity(2)).unwrap().set("crafting", 4);
+        uninterrupted.inventory_mut(Entity(2)).unwrap().add("wood", 9);
+        uninterrupted.set_held(Entity(3), true);
+
+        let saved = uninterrupted.snapshot();
+        let mut loaded = World::from_snapshot(saved.clone()).unwrap();
+        assert_eq!(loaded.snapshot(), saved);
+        uninterrupted.run_ticks(53);
+        loaded.run_ticks(53);
+        assert_eq!(loaded.snapshot(), uninterrupted.snapshot());
+    }
+
+    #[test]
+    fn snapshot_rejects_invalid_agent_references() {
+        let mut snapshot = World::generate(&cfg(5)).snapshot();
+        snapshot.agents[0].entity = Entity(u32::MAX);
+        assert!(matches!(
+            World::from_snapshot(snapshot),
+            Err(error) if error.contains("invalid or duplicate agent id")
+        ));
     }
 
     #[test]

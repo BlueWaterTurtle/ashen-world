@@ -447,6 +447,7 @@ name = "core_sim"
 version = "0.1.0"
 dependencies = [
  "hecs",
+ "serde",
 ]
 
 [[package]]
