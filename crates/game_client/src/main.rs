@@ -883,10 +883,36 @@ fn behaviors_from_content(c: &content::Content) -> Vec<Behavior> {
     }
 }
 
+fn apply_world_overrides(config: &mut WorldConfig, o: &content::WorldOverrides) {
+    if let Some(v) = o.seed {
+        config.seed = v;
+    }
+    if let Some(v) = o.agent_count {
+        config.agent_count = v;
+    }
+    if let Some(v) = o.chunk_radius {
+        config.chunk_radius = v;
+    }
+    if let Some(v) = o.max_path_requests_per_tick {
+        config.max_path_requests_per_tick = v;
+    }
+    if let Some(v) = o.starting_player_characters {
+        config.starting_player_characters = v;
+    }
+}
+
 fn main() {
     let content_dir = assets::root().join("content");
-    let (manifest, manifest_err) =
-        content::Manifest::load_or_default(content_dir.join("manifest.ron"));
+    let scenarios_dir = assets::root().join("scenarios");
+    let selector = std::env::var("ASHEN_SCENARIO").unwrap_or_else(|_| "default".to_string());
+    let (scenario, scenario_err) = content::Scenario::load_or_default(
+        content::Scenario::resolve_path(&scenarios_dir, &selector),
+    );
+    if let Some(e) = scenario_err {
+        eprintln!("scenario: {e}; using built-in default scenario");
+    }
+    println!("scenario: {}", scenario.name);
+    let (manifest, manifest_err) = scenario.resolve_manifest(&content_dir);
     if let Some(e) = manifest_err {
         eprintln!("manifest: {e}; using default composition");
     }
@@ -920,6 +946,8 @@ fn main() {
             (WorldConfig::default(), Vec::new())
         }
     };
+    let mut config = config;
+    apply_world_overrides(&mut config, &scenario.world);
     let world = World::generate(&config);
     let event_loop = match EventLoop::new() {
         Ok(l) => l,
@@ -938,6 +966,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_overrides_apply_and_default_is_noop() {
+        let mut c = WorldConfig::default();
+        apply_world_overrides(&mut c, &content::WorldOverrides::default());
+        assert_eq!(c, WorldConfig::default());
+        apply_world_overrides(
+            &mut c,
+            &content::WorldOverrides {
+                seed: Some(9),
+                agent_count: Some(3),
+                ..Default::default()
+            },
+        );
+        assert_eq!((c.seed, c.agent_count), (9, 3));
+        assert_eq!(c.chunk_radius, WorldConfig::default().chunk_radius);
+    }
 
     #[test]
     fn agent_frustum_culling_keeps_visible_and_discards_distant_agents() {
