@@ -5,7 +5,7 @@
 //! Cost: the check runs every [`JOB_CHECK_INTERVAL_TICKS`] ticks and only visits
 //! workers that have jobs (O(workers x jobs)); per-tick work is untouched.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::building::{Buildings, WorkStatus};
 use crate::chunk::WorldPos;
@@ -19,6 +19,21 @@ pub const JOB_CHECK_INTERVAL_TICKS: u64 = (TICKS_PER_SECOND / 2) as u64;
 const ARRIVE_RADIUS: f32 = 0.75;
 /// Most items a hauler carries per trip.
 pub const HAUL_CARRY: u32 = 10;
+/// How far (meters) from a construction site idle survivors look for material.
+pub const BUILD_SOURCE_RADIUS: f32 = 30.0;
+
+fn flat_dist(a: WorldPos, b: WorldPos) -> f32 {
+    ((a.x - b.x).powi(2) + (a.z - b.z).powi(2)).sqrt()
+}
+
+/// The hidden build job an idle survivor takes on for a construction site.
+/// `claim` is the amount of material this worker has promised to deliver, so
+/// several builders never over-fetch; a claim of 0 marks the finisher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct AutoBuild {
+    site: usize,
+    claim: u32,
+}
 
 /// Something a worker can be assigned to. Extend with new variants for new job kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +112,8 @@ struct WorkerJobs {
     /// Index into `jobs` of the haul job being carried out, if any.
     #[serde(default)]
     hauling: Option<usize>,
+    #[serde(default)]
+    auto_build: Option<AutoBuild>,
 }
 
 /// Job lists for all workers. Iteration order is by entity for determinism.
@@ -172,6 +189,11 @@ impl Jobs {
                 entry.jobs.swap(index, index + 1);
             }
         }
+    }
+
+    /// Construction site this worker is automatically building, if any.
+    pub fn auto_build_site(&self, worker: Entity) -> Option<usize> {
+        self.workers.get(&worker)?.auto_build.map(|a| a.site)
     }
 
     pub fn is_suspended(&self, worker: Entity) -> bool {
@@ -271,6 +293,7 @@ impl Jobs {
                 entry.suspended = true;
             }
             entry.hauling = None;
+            Self::drop_auto(worker, entry, buildings);
             Self::release(worker, entry, buildings, world);
         }
         world.command_move(worker, goal)
@@ -278,7 +301,10 @@ impl Jobs {
 
     /// Re-evaluate assignments. Cheap no-op except every [`JOB_CHECK_INTERVAL_TICKS`] ticks.
     pub fn update(&mut self, world: &mut World, buildings: &mut Buildings) {
-        if self.workers.is_empty() || world.tick % JOB_CHECK_INTERVAL_TICKS != 0 {
+        if world.tick % JOB_CHECK_INTERVAL_TICKS != 0 {
+            return;
+        }
+        if self.workers.is_empty() && buildings.sites.iter().all(|s| s.completed.is_some()) {
             return;
         }
         for building in &mut buildings.buildings {
@@ -288,6 +314,7 @@ impl Jobs {
             if world.is_alive(worker) {
                 return true;
             }
+            Self::drop_auto(worker, entry, buildings);
             Self::release(worker, entry, buildings, world);
             false
         });
@@ -298,16 +325,17 @@ impl Jobs {
                 let kept = site.completed.is_none()
                     && self.workers.get(&owner).is_some_and(|entry| {
                         !entry.suspended
-                            && entry
-                                .jobs
-                                .iter()
-                                .any(|job| matches!(*job, Job::Build { site, .. } if site == index))
+                            && (entry.auto_build.is_some_and(|a| a.site == index)
+                                || entry.jobs.iter().any(
+                                    |job| matches!(*job, Job::Build { site, .. } if site == index),
+                                ))
                     });
                 if !kept {
                     site.builder = None;
                 }
             }
         }
+        let mut busy = BTreeSet::new();
         for (&worker, entry) in self.workers.iter_mut() {
             let jobs_before = entry.jobs.len();
             entry.jobs.retain(|job| match *job {
@@ -323,6 +351,7 @@ impl Jobs {
             }
             if entry.suspended {
                 entry.hauling = None;
+                Self::drop_auto(worker, entry, buildings);
                 Self::release(worker, entry, buildings, world);
                 continue;
             }
@@ -359,10 +388,17 @@ impl Jobs {
                             .then_some(Chosen::Haul(index))
                     }
                 });
+            if chosen.is_some() {
+                busy.insert(worker);
+                Self::drop_auto(worker, entry, buildings);
+            }
             match chosen {
                 None => {
                     entry.hauling = None;
-                    Self::release(worker, entry, buildings, world);
+                    // Keep the hold on a worker the build pass below is driving.
+                    if entry.auto_build.is_none() || entry.active.is_some() {
+                        Self::release(worker, entry, buildings, world);
+                    }
                 }
                 Some(Chosen::Haul(index)) => {
                     if entry.active.is_some() {
@@ -468,6 +504,221 @@ impl Jobs {
                     }
                 }
             }
+        }
+        self.auto_build(world, buildings, &busy);
+        self.workers.retain(|_, e| {
+            !(e.jobs.is_empty()
+                && e.active.is_none()
+                && e.hauling.is_none()
+                && e.auto_build.is_none()
+                && !e.suspended)
+        });
+    }
+
+    fn drop_auto(worker: Entity, entry: &mut WorkerJobs, buildings: &mut Buildings) {
+        if let Some(auto) = entry.auto_build.take() {
+            if let Some(site) = buildings.sites.get_mut(auto.site) {
+                if site.builder == Some(worker) {
+                    site.builder = None;
+                    site.worked = false;
+                }
+            }
+        }
+    }
+
+    /// Idle player survivors take hidden build jobs on open construction sites:
+    /// fetch material from nearby stock (or their own inventory), deliver it,
+    /// and one of them finishes the building. Workers are visited in entity
+    /// order, so the outcome is deterministic.
+    fn auto_build(
+        &mut self,
+        world: &mut World,
+        buildings: &mut Buildings,
+        busy: &BTreeSet<Entity>,
+    ) {
+        let manual: BTreeSet<usize> = self
+            .workers
+            .values()
+            .flat_map(|w| w.jobs.iter())
+            .filter_map(|job| match *job {
+                Job::Build { site, .. } => Some(site),
+                _ => None,
+            })
+            .collect();
+        for (&worker, entry) in self.workers.iter_mut() {
+            let valid = entry.auto_build.is_some_and(|a| {
+                world.is_player_controlled(worker)
+                    && !manual.contains(&a.site)
+                    && buildings
+                        .sites
+                        .get(a.site)
+                        .is_some_and(|s| s.completed.is_none())
+            });
+            if entry.auto_build.is_some() && !valid {
+                Self::drop_auto(worker, entry, buildings);
+                world.set_held(worker, false);
+            }
+        }
+        let candidates: Vec<Entity> = world.player_characters().collect();
+        for worker in candidates {
+            if busy.contains(&worker) {
+                continue;
+            }
+            let state = self.workers.get(&worker);
+            if state.is_some_and(|e| e.suspended) {
+                continue;
+            }
+            let current = state.and_then(|e| e.auto_build);
+            if current.is_none() && world.is_navigating(worker) {
+                // Following an explicit player move command.
+                continue;
+            }
+            let auto = match current {
+                Some(auto) => Some(auto),
+                None => self.pick_site(world, buildings, worker, &manual),
+            };
+            let next = auto.and_then(|auto| Self::step_build(world, buildings, worker, auto));
+            match next {
+                Some(auto) => {
+                    self.workers.entry(worker).or_default().auto_build = Some(auto);
+                    world.set_held(worker, true);
+                }
+                None => {
+                    if let Some(entry) = self.workers.get_mut(&worker) {
+                        Self::drop_auto(worker, entry, buildings);
+                        if entry.active.is_none() && entry.hauling.is_none() {
+                            world.set_held(worker, false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The nearest open site that still needs material or a finisher.
+    fn pick_site(
+        &self,
+        world: &World,
+        buildings: &Buildings,
+        worker: Entity,
+        manual: &BTreeSet<usize>,
+    ) -> Option<AutoBuild> {
+        let from = world.position(worker);
+        let mut best: Option<(f32, AutoBuild)> = None;
+        for (index, site) in buildings.sites.iter().enumerate() {
+            if site.completed.is_some() || manual.contains(&index) {
+                continue;
+            }
+            let claimed: u32 = self
+                .workers
+                .values()
+                .filter_map(|w| w.auto_build)
+                .filter(|a| a.site == index)
+                .map(|a| a.claim)
+                .sum();
+            let unclaimed = site
+                .required
+                .saturating_sub(site.delivered)
+                .saturating_sub(claimed);
+            let claim = if unclaimed > 0 {
+                let carried = world
+                    .inventory(worker)
+                    .map_or(0, |inv| inv.count_of(site.material.id()));
+                if carried > 0 {
+                    unclaimed.min(carried)
+                } else {
+                    let Some(source) = buildings.find_material_source(index, BUILD_SOURCE_RADIUS)
+                    else {
+                        continue;
+                    };
+                    let stock = buildings.buildings[source]
+                        .outputs
+                        .count_of(site.material.id());
+                    unclaimed.min(HAUL_CARRY).min(stock)
+                }
+            } else if site.delivered >= site.required && site.builder.is_none() {
+                0
+            } else {
+                continue;
+            };
+            let dist = flat_dist(from, site.worker_position());
+            if best.is_none_or(|(d, _)| dist < d) {
+                best = Some((dist, AutoBuild { site: index, claim }));
+            }
+        }
+        best.map(|(_, auto)| auto)
+    }
+
+    /// Advance one worker's build job by one check; `None` ends the job.
+    fn step_build(
+        world: &mut World,
+        buildings: &mut Buildings,
+        worker: Entity,
+        auto: AutoBuild,
+    ) -> Option<AutoBuild> {
+        let site = buildings.sites.get(auto.site)?;
+        let material = site.material.id();
+        let site_pos = site.worker_position();
+        let p = world.position(worker);
+        if site.delivered >= site.required {
+            // Fully supplied: the first worker to get here reserves and finishes it.
+            match site.builder {
+                Some(b) if b != worker => return None,
+                _ => buildings.sites[auto.site].builder = Some(worker),
+            }
+            if flat_dist(p, site_pos) <= ARRIVE_RADIUS {
+                buildings.sites[auto.site].worked = true;
+            } else if !world.is_navigating(worker) {
+                world.navigate_to(worker, site_pos);
+            }
+            return Some(AutoBuild { claim: 0, ..auto });
+        }
+        let carried = world
+            .inventory(worker)
+            .map_or(0, |inv| inv.count_of(material));
+        if carried > 0 {
+            if flat_dist(p, site_pos) <= ARRIVE_RADIUS {
+                let moved = {
+                    let mut inventory = world.inventory_mut(worker)?;
+                    buildings
+                        .site_deliver(auto.site, &mut inventory)
+                        .unwrap_or(0)
+                };
+                let claim = auto.claim.saturating_sub(moved);
+                let site = &buildings.sites[auto.site];
+                if claim == 0 && site.delivered < site.required {
+                    return None;
+                }
+                return Some(AutoBuild { claim, ..auto });
+            }
+            if !world.is_navigating(worker) {
+                world.navigate_to(worker, site_pos);
+            }
+            return Some(auto);
+        }
+        if auto.claim == 0 {
+            return None;
+        }
+        let source = buildings.find_material_source(auto.site, BUILD_SOURCE_RADIUS)?;
+        let source_pos = buildings.buildings[source].worker_slot_position(0);
+        if flat_dist(p, source_pos) <= ARRIVE_RADIUS {
+            let taken = {
+                let mut inventory = world.inventory_mut(worker)?;
+                buildings
+                    .site_pickup(
+                        source,
+                        auto.site,
+                        &mut inventory,
+                        auto.claim.min(HAUL_CARRY),
+                    )
+                    .unwrap_or(0)
+            };
+            (taken > 0).then_some(auto)
+        } else {
+            if !world.is_navigating(worker) {
+                world.navigate_to(worker, source_pos);
+            }
+            Some(auto)
         }
     }
 
@@ -956,6 +1207,190 @@ mod tests {
         for _ in 0..8 {
             build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
             build_step(&mut w2, &mut b2, &mut j2, w, store, site);
+        }
+        assert_eq!(buildings.sites, b2.sites);
+        assert_eq!(buildings.buildings, b2.buildings);
+        assert!(buildings.sites[site].completed.is_some());
+    }
+
+    /// Three player survivors, an ore store with 5 ore and a one-ore site.
+    fn auto_setup() -> (World, Buildings, Jobs, Vec<Entity>, usize, usize) {
+        let mut world = World::generate(&WorldConfig {
+            agent_count: 3,
+            ..Default::default()
+        });
+        let workers: Vec<Entity> = world.entities().take(3).collect();
+        for &w in &workers {
+            world.set_player_controlled(w, true);
+        }
+        let mut buildings = Buildings::default();
+        let store = buildings
+            .place_with_logistics(
+                world.seed,
+                world.terrain_edits(),
+                "ore_storage",
+                Footprint {
+                    x: 0,
+                    z: 0,
+                    width: 2,
+                    depth: 2,
+                },
+                &PlacementRules::default(),
+                BuildingLogistics {
+                    input_slots: 1,
+                    output_slots: 1,
+                    input_resources: vec!["iron_ore".into()],
+                    output_resources: vec!["iron_ore".into()],
+                    is_storage: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        buildings.buildings[store]
+            .outputs
+            .insert_resource("iron_ore", 5);
+        let site = buildings
+            .request_construction(
+                world.seed,
+                world.terrain_edits(),
+                "house",
+                Footprint {
+                    x: 10,
+                    z: 0,
+                    width: 2,
+                    depth: 2,
+                },
+                &PlacementRules::default(),
+                BuildingLogistics::default(),
+                ResourceKind::IronOre,
+                1,
+            )
+            .unwrap();
+        (world, buildings, Jobs::new(), workers, store, site)
+    }
+
+    /// Teleport every builder to its next stop, then run one job check.
+    fn auto_step(world: &mut World, buildings: &mut Buildings, jobs: &mut Jobs, store: usize) {
+        let players: Vec<Entity> = world.player_characters().collect();
+        for w in players {
+            let Some(site) = jobs.auto_build_site(w) else {
+                world.set_position(w, buildings.buildings[store].worker_slot_position(0));
+                continue;
+            };
+            let carrying = world
+                .inventory(w)
+                .is_some_and(|i| i.count_of("iron_ore") > 0);
+            let p = if carrying || buildings.site_needs(site) == 0 {
+                buildings.sites[site].worker_position()
+            } else {
+                buildings.buildings[store].worker_slot_position(0)
+            };
+            world.set_position(w, p);
+        }
+        world.tick = JOB_CHECK_INTERVAL_TICKS * (world.tick / JOB_CHECK_INTERVAL_TICKS + 1);
+        jobs.update(world, buildings);
+        buildings.tick_production(2.0);
+    }
+
+    fn ore_carried(world: &World, workers: &[Entity]) -> u32 {
+        workers
+            .iter()
+            .map(|&w| world.inventory(w).unwrap().count_of("iron_ore"))
+            .sum()
+    }
+
+    #[test]
+    fn only_one_idle_survivor_fetches_a_one_ore_need() {
+        let (mut world, mut buildings, mut jobs, workers, store, _site) = auto_setup();
+        auto_step(&mut world, &mut buildings, &mut jobs, store);
+        let building: Vec<_> = workers
+            .iter()
+            .filter(|&&w| jobs.auto_build_site(w).is_some())
+            .collect();
+        assert_eq!(building.len(), 1);
+        assert_eq!(ore_carried(&world, &workers), 1);
+        assert_eq!(buildings.buildings[store].outputs.count_of("iron_ore"), 4);
+    }
+
+    #[test]
+    fn idle_survivors_build_the_site_to_completion() {
+        let (mut world, mut buildings, mut jobs, workers, store, site) = auto_setup();
+        for _ in 0..40 {
+            auto_step(&mut world, &mut buildings, &mut jobs, store);
+            if buildings.sites[site].completed.is_some() {
+                break;
+            }
+        }
+        let built = buildings.sites[site].completed.expect("site completed");
+        assert_eq!(buildings.buildings[built].def, "house");
+        assert_eq!(buildings.buildings[store].outputs.count_of("iron_ore"), 4);
+        auto_step(&mut world, &mut buildings, &mut jobs, store);
+        for &w in &workers {
+            assert_eq!(jobs.auto_build_site(w), None);
+            assert!(!world.is_held(w));
+        }
+        assert!(jobs.workers.is_empty());
+    }
+
+    #[test]
+    fn player_move_releases_the_claim_for_someone_else() {
+        let (mut world, mut buildings, mut jobs, workers, store, site) = auto_setup();
+        auto_step(&mut world, &mut buildings, &mut jobs, store);
+        let first = workers
+            .iter()
+            .copied()
+            .find(|&w| jobs.auto_build_site(w).is_some())
+            .unwrap();
+        let goal = WorldPos::new(40.0, 0.0, 40.0);
+        jobs.player_move(&mut world, &mut buildings, first, goal)
+            .unwrap();
+        assert_eq!(jobs.auto_build_site(first), None);
+        auto_step(&mut world, &mut buildings, &mut jobs, store);
+        let second = workers
+            .iter()
+            .copied()
+            .find(|&w| jobs.auto_build_site(w) == Some(site))
+            .expect("another survivor takes over");
+        assert_ne!(second, first);
+    }
+
+    #[test]
+    fn stock_running_out_releases_the_claim() {
+        let (mut world, mut buildings, mut jobs, workers, store, _site) = auto_setup();
+        for &w in &workers {
+            world.set_position(w, WorldPos::new(20.0, 0.0, 20.0));
+        }
+        world.tick = JOB_CHECK_INTERVAL_TICKS;
+        jobs.update(&mut world, &mut buildings);
+        assert!(workers.iter().any(|&w| jobs.auto_build_site(w).is_some()));
+        buildings.buildings[store]
+            .outputs
+            .remove_resource("iron_ore", 5);
+        world.tick = JOB_CHECK_INTERVAL_TICKS * 2;
+        jobs.update(&mut world, &mut buildings);
+        assert!(workers.iter().all(|&w| jobs.auto_build_site(w).is_none()));
+    }
+
+    #[test]
+    fn sites_with_a_manual_build_job_are_left_alone() {
+        let (mut world, mut buildings, mut jobs, workers, store, site) = auto_setup();
+        jobs.add_job(workers[0], Job::Build { site, from: store });
+        world.tick = JOB_CHECK_INTERVAL_TICKS;
+        jobs.update(&mut world, &mut buildings);
+        assert!(workers[1..]
+            .iter()
+            .all(|&w| jobs.auto_build_site(w).is_none()));
+    }
+
+    #[test]
+    fn auto_building_is_deterministic_across_clone() {
+        let (mut world, mut buildings, mut jobs, _workers, store, site) = auto_setup();
+        auto_step(&mut world, &mut buildings, &mut jobs, store);
+        let (mut b2, mut j2) = (buildings.clone(), jobs.clone());
+        let mut w2 = World::from_snapshot(world.snapshot()).expect("restore");
+        for _ in 0..12 {
+            auto_step(&mut world, &mut buildings, &mut jobs, store);
+            auto_step(&mut w2, &mut b2, &mut j2, store);
         }
         assert_eq!(buildings.sites, b2.sites);
         assert_eq!(buildings.buildings, b2.buildings);
