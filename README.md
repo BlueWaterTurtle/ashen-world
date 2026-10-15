@@ -45,7 +45,7 @@ The client needs a desktop display supported by `winit` and `wgpu`.
 | `1` / `2` / `3` | Select one of the first three player characters |
 | `Space` | Center the camera on the selected character |
 | `R` | Recruit the nearest recruitable character within range |
-| Select a building in the HUD, then left-click terrain | Place that building |
+| Select a building in the HUD, then left-click terrain | Place that building. Every building except the iron mine costs 1 iron ore: it becomes a construction site, and idle survivors fetch ore from stocks within 30 m and build it |
 | `T` | Toggle terrain editing |
 | `F1`–`F5` while editing | Raise, lower, flatten, smooth, or slope |
 | `[` / `]` while editing | Decrease / increase brush radius |

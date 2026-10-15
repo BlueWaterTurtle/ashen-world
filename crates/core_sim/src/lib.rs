@@ -22,7 +22,9 @@ pub use building::{
 };
 pub use chunk::{ChunkCoord, WorldPos, CHUNK_SIZE};
 pub use clock::GameClock;
-pub use job::{Job, JobStatus, Jobs, WorkerActivity, HAUL_CARRY, JOB_CHECK_INTERVAL_TICKS};
+pub use job::{
+    Job, JobStatus, Jobs, WorkerActivity, BUILD_SOURCE_RADIUS, HAUL_CARRY, JOB_CHECK_INTERVAL_TICKS,
+};
 pub use npc::{
     DespawnError, EntityKind, Inventory, ItemStack, LodConfig, NavGoal, NpcId, PersistentNpcRecord,
     SimTier, SimulationTier, Skills,
