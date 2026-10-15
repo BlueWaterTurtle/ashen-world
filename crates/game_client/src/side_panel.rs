@@ -117,6 +117,8 @@ fn build_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
         ui.small(status);
     }
 
+    ui.small("Costs are not charged in this prototype.");
+
     let categories = ["Mines", "Farms", "Housing", "Industry", "Storage"];
     for category in categories {
         let entries: Vec<_> = p
@@ -127,50 +129,62 @@ fn build_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
         if entries.is_empty() {
             continue;
         }
-        ui.label(category);
+        ui.label(egui::RichText::new(category).strong());
         for definition in entries {
             let selected = p.selected_building.as_deref() == Some(&definition.id);
             let label = format!(
                 "{}  {} × {}",
                 definition.name, definition.width, definition.depth
             );
-            if ui.selectable_label(selected, label).clicked() {
+            let response = ui
+                .selectable_label(selected, label)
+                .on_hover_ui(|ui| building_details(ui, definition));
+            if response.clicked() {
                 *p.selected_building = Some(definition.id.clone());
                 p.actions
                     .push(UiAction::SelectBuilding(definition.id.clone()));
             }
-            if !definition.cost.is_empty() {
-                let cost = definition
-                    .cost
-                    .iter()
-                    .map(|(item, amount)| format!("{item} {amount:.0}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                ui.small(format!("Cost: {cost} (not charged in prototype)"));
-            }
-            if !definition.output_resources.is_empty() {
-                ui.small(format!(
-                    "Output: {}",
-                    definition.output_resources.join(", ")
-                ));
-            }
-            if definition.storage {
-                ui.small(format!(
-                    "Stores: {} per resource, stack limit {}",
-                    definition.input_slots, definition.stack_limit
-                ));
-            }
-            if let Some(resource) = &definition.requires_resource {
-                if definition.min_resource_richness.is_some() {
-                    ui.small(format!("{} richness must be above zero.", resource));
-                } else {
-                    ui.small(format!("Requires {resource} in its footprint."));
-                }
-            }
-            if definition.min_fertility.is_some() {
-                ui.small("Soil fertility must be above zero.");
+            if selected {
+                ui.indent(("build_details", &definition.id), |ui| {
+                    building_details(ui, definition);
+                });
             }
         }
+    }
+}
+
+/// Cost, output, storage and placement requirements for one building.
+fn building_details(ui: &mut egui::Ui, definition: &content::BuildingDef) {
+    if !definition.cost.is_empty() {
+        let cost = definition
+            .cost
+            .iter()
+            .map(|(item, amount)| format!("{item} {amount:.0}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        ui.small(format!("Cost: {cost}"));
+    }
+    if !definition.output_resources.is_empty() {
+        ui.small(format!(
+            "Output: {}",
+            definition.output_resources.join(", ")
+        ));
+    }
+    if definition.storage {
+        ui.small(format!(
+            "Stores: {} per resource, stack limit {}",
+            definition.input_slots, definition.stack_limit
+        ));
+    }
+    if let Some(resource) = &definition.requires_resource {
+        if definition.min_resource_richness.is_some() {
+            ui.small(format!("{} richness must be above zero.", resource));
+        } else {
+            ui.small(format!("Requires {resource} in its footprint."));
+        }
+    }
+    if definition.min_fertility.is_some() {
+        ui.small("Soil fertility must be above zero.");
     }
 }
 
