@@ -19,37 +19,50 @@ pub(crate) fn show(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
     ui.heading("ASHEN WORLD");
     ui.label(format!("{} survivors", p.world.player_character_count()));
     ui.separator();
-    squad_section(ui, p);
-    ui.separator();
-    selected_section(ui, p);
-    ui.separator();
-    build_section(ui, p);
-    ui.separator();
-    recruit_section(ui, p);
-}
-
-fn squad_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
-    ui.heading("Squad");
-    ui.small(format!("{} selected", p.selected_entities.len()));
     egui::ScrollArea::vertical()
-        .max_height(180.0)
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            for character in p.world.player_characters() {
-                let selected = p.selected_entities.contains(&character);
-                let label = format!(
-                    "{}{}",
-                    if selected { "● " } else { "○ " },
-                    character_label(character)
-                );
-                if ui.selectable_label(selected, label).clicked() {
-                    p.actions.push(UiAction::Select(character));
-                }
-            }
+            section(ui, "squad", "Squad", true, |ui| squad_section(ui, p));
+            section(ui, "selected", "Selected", true, |ui| {
+                selected_section(ui, p)
+            });
+            section(ui, "build", "Build", false, |ui| build_section(ui, p));
+            section(ui, "recruits", "Nearby recruits", false, |ui| {
+                recruit_section(ui, p)
+            });
         });
 }
 
+/// A collapsible panel section; egui remembers its open state per id.
+fn section(
+    ui: &mut egui::Ui,
+    id: &str,
+    title: &str,
+    default_open: bool,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    egui::CollapsingHeader::new(egui::RichText::new(title).heading())
+        .id_salt(id)
+        .default_open(default_open)
+        .show(ui, body);
+}
+
+fn squad_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
+    ui.small(format!("{} selected", p.selected_entities.len()));
+    for character in p.world.player_characters() {
+        let selected = p.selected_entities.contains(&character);
+        let label = format!(
+            "{}{}",
+            if selected { "● " } else { "○ " },
+            character_label(character)
+        );
+        if ui.selectable_label(selected, label).clicked() {
+            p.actions.push(UiAction::Select(character));
+        }
+    }
+}
+
 fn selected_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
-    ui.heading("Selected");
     let Some(selected) = p.world.selected_character() else {
         ui.label("No character selected");
         return;
@@ -85,7 +98,6 @@ fn selected_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
 }
 
 fn build_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
-    ui.heading("Build");
     if let Some(active_id) = p.selected_building.as_deref() {
         let name = p
             .building_defs
@@ -163,7 +175,6 @@ fn build_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
 }
 
 fn recruit_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
-    ui.heading("Nearby recruits");
     let world = p.world;
     let mut candidates: Vec<(Entity, f32)> = world
         .entities()
@@ -183,18 +194,14 @@ fn recruit_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
     if candidates.is_empty() {
         ui.small("No eligible characters in interaction range.");
     } else {
-        egui::ScrollArea::vertical()
-            .max_height(150.0)
-            .show(ui, |ui| {
-                for (entity, distance) in candidates.into_iter().take(8) {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{}  {:.1} m", character_label(entity), distance));
-                        if ui.small_button("Recruit").clicked() {
-                            p.actions.push(UiAction::Recruit(entity));
-                        }
-                    });
+        for (entity, distance) in candidates.into_iter().take(8) {
+            ui.horizontal(|ui| {
+                ui.label(format!("{}  {:.1} m", character_label(entity), distance));
+                if ui.small_button("Recruit").clicked() {
+                    p.actions.push(UiAction::Recruit(entity));
                 }
             });
+        }
     }
 }
 
