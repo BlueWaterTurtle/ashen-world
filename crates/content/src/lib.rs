@@ -179,7 +179,7 @@ pub enum ContentError {
     },
     Parse {
         path: PathBuf,
-        source: ron::Error,
+        source: ron::error::SpannedError,
     },
     Invalid {
         path: PathBuf,
@@ -449,9 +449,38 @@ mod tests {
         let src = assets_dir();
         let dir = std::env::temp_dir().join("ashen_world_bad_ref");
         std::fs::create_dir_all(&dir).unwrap();
-        for f in ["factions", "biomes", "races", "behaviors", "buildings", "crops"] {
+        for f in [
+            "factions",
+            "biomes",
+            "races",
+            "behaviors",
+            "buildings",
+            "crops",
+        ] {
             std::fs::copy(src.join(format!("{f}.ron")), dir.join(format!("{f}.ron"))).unwrap();
         }
         std::fs::write(
             dir.join("units.ron"),
-            r#"[(id:"x",name:"X",faction:"wanderers",max_health:1.0,move_speed:1.0,race:"human",behavior:"nope")]
+            r#"[(id:"x",name:"X",faction:"wanderers",max_health:1.0,move_speed:1.0,race:"human",behavior:"nope")]"#,
+        )
+        .unwrap();
+        let err = load_content(&dir).unwrap_err();
+        assert!(err.to_string().contains("unknown behavior 'nope'"));
+    }
+
+    #[test]
+    fn missing_dir_reports_path() {
+        let err = load_content("/nonexistent/dir").unwrap_err();
+        assert!(err.to_string().contains("factions.ron"));
+    }
+
+    #[test]
+    fn bad_ron_reports_parse_error() {
+        let dir = std::env::temp_dir().join("ashen_world_bad_content");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("factions.ron"), "[{").unwrap();
+        let err = load_content(&dir).unwrap_err();
+        assert!(matches!(err, ContentError::Parse { .. }));
+        assert!(err.to_string().contains("invalid RON"));
+    }
+}

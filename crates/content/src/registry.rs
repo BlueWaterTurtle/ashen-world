@@ -26,7 +26,9 @@ pub struct ContentRegistry<T> {
 
 impl<T> Default for ContentRegistry<T> {
     fn default() -> Self {
-        Self { entries: BTreeMap::new() }
+        Self {
+            entries: BTreeMap::new(),
+        }
     }
 }
 
@@ -72,12 +74,19 @@ impl<T: HasId + Serialize + DeserializeOwned> ContentRegistry<T> {
         crate::cache::load_dir_into(&mut reg, &base.join(kind), "base", cache_dir)?;
         let mods_dir = workspace_root.join("mods");
         let mut mods: Vec<_> = match std::fs::read_dir(&mods_dir) {
-            Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect(),
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect(),
             Err(_) => Vec::new(),
         };
         mods.sort();
         for m in mods {
-            let name = m.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = m
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             crate::cache::load_dir_into(&mut reg, &m.join(kind), &name, cache_dir)?;
         }
         Ok(reg)

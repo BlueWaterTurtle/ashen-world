@@ -100,7 +100,7 @@ impl GameUi {
                         selection,
                         0.0,
                         Color32::from_rgba_unmultiplied(70, 180, 130, 35),
-                        Stroke::new(1.5, Color32::from_rgb(112, 224, 174)),
+                        Stroke::new(1.5_f32, Color32::from_rgb(112, 224, 174)),
                     );
             }
             let view_proj = camera.view_proj();
@@ -145,7 +145,7 @@ impl GameUi {
                 if let Some(points) = points {
                     painter.add(egui::Shape::closed_line(
                         points,
-                        Stroke::new(2.0, Color32::from_rgb(225, 190, 120)),
+                        Stroke::new(2.0_f32, Color32::from_rgb(225, 190, 120)),
                     ));
                 }
             }
