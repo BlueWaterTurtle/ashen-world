@@ -131,6 +131,20 @@ impl SaveEnvelope {
             jobs: jobs.clone(),
         }
     }
+
+    /// Validate this save against the running composition and rebuild the game state.
+    pub fn restore(self, current: &SaveMetadata) -> Result<(World, Buildings, Jobs), String> {
+        let differences = self.metadata.differences(current);
+        if !differences.is_empty() {
+            return Err(format!(
+                "save composition is incompatible: {}",
+                differences.join("; ")
+            ));
+        }
+        let world = World::from_snapshot(self.world)
+            .map_err(|error| format!("invalid world snapshot: {error}"))?;
+        Ok((world, self.buildings, self.jobs))
+    }
 }
 
 pub fn resolve_load_path(source: &str) -> PathBuf {
@@ -315,6 +329,20 @@ mod tests {
         let error = read_save(&path).unwrap_err();
         assert!(error.contains("unsupported save format version"));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn restore_rejects_incompatible_metadata_and_accepts_matching() {
+        let mut current = metadata();
+        current.mods.clear();
+        let error = envelope().restore(&current).err().unwrap();
+        assert!(error.contains("save composition is incompatible"));
+        assert!(error.contains("loaded mods changed"));
+
+        let (world, buildings, jobs) = envelope().restore(&metadata()).unwrap();
+        assert_eq!(world.snapshot(), envelope().world);
+        assert_eq!(buildings.buildings.len(), 1);
+        assert_eq!(jobs.jobs(Entity(0)), &[Job::Work { building: 0 }]);
     }
 
     #[test]
