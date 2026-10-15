@@ -74,6 +74,25 @@ impl<'a> KnownIds<'a> {
         self.unchecked.insert(kind);
     }
 
+    /// Messages for references from `items` into disabled (unchecked) domains.
+    pub fn disabled_references<T: ContentDomain>(&self, items: &[T]) -> Vec<String> {
+        let mut out = Vec::new();
+        for item in items {
+            for r in item.references() {
+                if self.unchecked.contains(r.target) {
+                    out.push(format!(
+                        "{} '{}' references {} '{}' in a disabled domain (not validated)",
+                        T::KIND,
+                        item.id(),
+                        r.target,
+                        r.id
+                    ));
+                }
+            }
+        }
+        out
+    }
+
     /// Check every declared reference of `items`; returns the first dangling one as a message.
     pub fn check_references<T: ContentDomain>(&self, items: &[T]) -> Result<(), String> {
         for item in items {
