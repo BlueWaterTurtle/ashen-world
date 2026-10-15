@@ -18,6 +18,11 @@ pub enum UiAction {
         worker: Entity,
         building: usize,
     },
+    AddBuild {
+        worker: Entity,
+        site: usize,
+        from: usize,
+    },
     AddHaul {
         worker: Entity,
         from: usize,
@@ -163,6 +168,33 @@ impl GameUi {
                     painter.add(egui::Shape::closed_line(
                         points,
                         Stroke::new(2.0_f32, Color32::from_rgb(225, 190, 120)),
+                    ));
+                }
+            }
+
+            for site in buildings.sites.iter().filter(|s| s.completed.is_none()) {
+                let fp = site.footprint;
+                let corners = [
+                    (fp.x, fp.z),
+                    (fp.x + fp.width, fp.z),
+                    (fp.x + fp.width, fp.z + fp.depth),
+                    (fp.x, fp.z + fp.depth),
+                ];
+                let points: Option<Vec<Pos2>> = corners
+                    .into_iter()
+                    .map(|(x, z)| {
+                        let position = Vec3::new(
+                            x as f32,
+                            world.terrain_edits().height(seed, x as f32, z as f32) + 0.3,
+                            z as f32,
+                        );
+                        project_to_screen(view_proj, position, screen_width, screen_height)
+                    })
+                    .collect();
+                if let Some(points) = points {
+                    painter.add(egui::Shape::closed_line(
+                        points,
+                        Stroke::new(2.0_f32, Color32::from_rgb(110, 170, 225)),
                     ));
                 }
             }
@@ -512,7 +544,7 @@ fn status_text(status: JobStatus) -> &'static str {
         JobStatus::NoFreeSlot => "no free worker slot",
         JobStatus::Queued => "waiting (higher priority first)",
         JobStatus::Suspended => "suspended",
-        JobStatus::Hauling => "hauling",
+        JobStatus::Hauling => "hauling / building",
         JobStatus::Invalid => "building missing",
     }
 }
@@ -545,6 +577,11 @@ fn job_panel(
                 item.id(),
                 building_label(buildings, defs, from),
                 building_label(buildings, defs, to)
+            ),
+            Job::Build { site, from } => format!(
+                "Build {}: {} -> site #{site}",
+                buildings.sites.get(site).map_or("?", |s| s.def.as_str()),
+                building_label(buildings, defs, from)
             ),
         };
         ui.horizontal(|ui| {
@@ -586,6 +623,32 @@ fn job_panel(
                 }
             });
     }
+    let builds: Vec<(usize, usize)> = (0..buildings.sites.len())
+        .filter(|&site| buildings.sites[site].completed.is_none())
+        .flat_map(|site| (0..buildings.buildings.len()).map(move |from| (site, from)))
+        .filter(|&(site, from)| {
+            buildings.buildings[from]
+                .outputs
+                .allows(buildings.sites[site].material.id())
+                && !list.contains(&Job::Build { site, from })
+        })
+        .collect();
+    if !builds.is_empty() {
+        egui::ComboBox::from_id_salt("add_build")
+            .selected_text("Add build job…")
+            .show_ui(ui, |ui| {
+                for (site, from) in builds {
+                    let label = format!(
+                        "{} site #{site} from {}",
+                        buildings.sites[site].def,
+                        building_label(buildings, defs, from)
+                    );
+                    if ui.selectable_label(false, label).clicked() {
+                        actions.push(UiAction::AddBuild { worker, site, from });
+                    }
+                }
+            });
+    }
     let ore = ResourceKind::IronOre.id();
     let hauls: Vec<(usize, usize)> = (0..buildings.buildings.len())
         .flat_map(|from| (0..buildings.buildings.len()).map(move |to| (from, to)))
@@ -615,6 +678,20 @@ fn job_panel(
                     }
                 }
             });
+    }
+    for (i, site) in buildings.sites.iter().enumerate() {
+        let state = if site.completed.is_some() {
+            "done".to_string()
+        } else {
+            format!(
+                "{}/{} {}, {:.0}% built",
+                site.delivered,
+                site.required,
+                site.material.id(),
+                100.0 * site.progress / core_sim::BUILD_SECONDS
+            )
+        };
+        ui.small(format!("Site #{i} {}: {state}", site.def));
     }
     for (i, b) in buildings.buildings.iter().enumerate() {
         let stock = |inv: &core_sim::SlotInventory| {

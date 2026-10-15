@@ -135,6 +135,18 @@ lives in the worker inventory, so it is saved with the world). A building with `
 seconds. All of it is stored in `Buildings`/`Jobs` and round-trips through save/load. The job panel
 shows haul jobs and per-building input/output stock.
 
+## Construction (request -> haul -> build)
+
+`Buildings::request_construction` validates a footprint and reserves it as a `ConstructionSite`
+(`Buildings::sites`, saved with the buildings; old saves load with no sites). A
+`Job::Build { site, from }` worker reserves the site (one builder at a time; the reservation is
+dropped when the job is removed, the worker dies or is suspended), picks up the site's material
+from `from`'s output, delivers it, then works at the site; after `BUILD_SECONDS` of work the real
+building is appended to `Buildings` and the site is marked `completed`. Completed sites are kept so
+site indices stay stable; their jobs are dropped at the next job check. In the client press **C**
+(construction mode), pick a building and click: this requests the site, tops up a Wood Store with
+the cost (debug aid, wood is not produced yet) and gives the selected worker the build job.
+
 ## Adding a content domain
 
 1. Add `crates/content/src/domains/<name>.rs` with the type and a `ContentDomain` impl

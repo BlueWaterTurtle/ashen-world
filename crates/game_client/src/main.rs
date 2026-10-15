@@ -155,6 +155,8 @@ struct App {
     building_defs: Vec<content::BuildingDef>,
     schedule: Schedule,
     build_mode: Option<String>,
+    /// Debug: placing a selected building requests construction instead of placing it instantly.
+    construct_mode: bool,
     build_status: Option<String>,
     editor: TerrainEditor,
     camera: Camera,
@@ -192,6 +194,7 @@ impl App {
             building_defs,
             schedule,
             build_mode: None,
+            construct_mode: false,
             build_status: None,
             editor: TerrainEditor {
                 active: false,
@@ -392,6 +395,10 @@ impl App {
                 is_smelter: definition.smelter,
                 required_inputs: definition.required_inputs.clone(),
             };
+            if self.construct_mode {
+                self.request_construction(&definition, footprint, &rules, logistics);
+                return;
+            }
             match self.buildings.place_with_logistics(
                 self.world.seed,
                 self.world.terrain_edits(),
@@ -458,6 +465,60 @@ impl App {
         }
     }
 
+    /// Debug construction request: reserve a site for `definition`, keep a wood store stocked
+    /// for it (wood is not produced anywhere yet), and put the selected worker on the build job.
+    fn request_construction(
+        &mut self,
+        definition: &content::BuildingDef,
+        footprint: Footprint,
+        rules: &PlacementRules,
+        logistics: BuildingLogistics,
+    ) {
+        let wood = ResourceKind::Wood;
+        let required = definition
+            .cost
+            .get(wood.id())
+            .map_or(0, |amount| amount.max(0.0).round() as u32);
+        let Some(store) = (0..self.buildings.buildings.len()).find(|&i| {
+            let b = &self.buildings.buildings[i];
+            b.is_storage && b.outputs.allows(wood.id())
+        }) else {
+            self.build_status = Some("Construction needs a wood store: place a Wood Store.".into());
+            return;
+        };
+        match self.buildings.request_construction(
+            self.world.seed,
+            self.world.terrain_edits(),
+            &definition.id,
+            footprint,
+            rules,
+            logistics,
+            wood,
+            required,
+        ) {
+            Ok(site) => {
+                self.buildings.buildings[store]
+                    .outputs
+                    .insert_resource(wood.id(), required);
+                let mut status = format!("Construction of {} requested.", definition.name);
+                if let Some(worker) = self.world.selected_character() {
+                    self.jobs.add_job(worker, Job::Build { site, from: store });
+                } else {
+                    status.push_str(" Select a worker and add the build job.");
+                }
+                self.build_status = Some(status);
+                self.build_mode = None;
+                self.construct_mode = false;
+                if let Some(ui) = &mut self.ui {
+                    ui.set_selected_building(None);
+                }
+            }
+            Err(error) => {
+                self.build_status = Some(format!("Can't build here: {error:?}."));
+            }
+        }
+    }
+
     fn frame(&mut self) {
         if let Some(renderer) = &self.renderer {
             self.camera.aspect = renderer.aspect();
@@ -503,6 +564,9 @@ impl App {
                 }
                 UiAction::AddJob { worker, building } => {
                     self.jobs.add_job(worker, Job::Work { building });
+                }
+                UiAction::AddBuild { worker, site, from } => {
+                    self.jobs.add_job(worker, Job::Build { site, from });
                 }
                 UiAction::AddHaul { worker, from, to } => {
                     self.jobs.add_job(
@@ -799,6 +863,14 @@ impl ApplicationHandler for App {
                         KeyCode::KeyD | KeyCode::ArrowRight => self.input.right = down,
                         KeyCode::KeyW | KeyCode::ArrowUp => self.input.forward = down,
                         KeyCode::KeyS | KeyCode::ArrowDown => self.input.back = down,
+                        KeyCode::KeyC if down => {
+                            self.construct_mode = !self.construct_mode;
+                            self.build_status = Some(if self.construct_mode {
+                                "Construction mode: pick a building, click to request it.".into()
+                            } else {
+                                "Construction mode off.".into()
+                            });
+                        }
                         KeyCode::KeyQ if down => self.camera.orbit(-0.2, 0.0),
                         KeyCode::KeyE if down => self.camera.orbit(0.2, 0.0),
                         KeyCode::Digit1 if down => {
