@@ -15,36 +15,50 @@ pub(crate) struct PanelCtx<'a> {
     pub actions: &'a mut Vec<UiAction>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Squad,
+    Build,
+    Jobs,
+}
+
+impl Tab {
+    const ALL: [(Tab, &'static str); 3] = [
+        (Tab::Squad, "Squad"),
+        (Tab::Build, "Build"),
+        (Tab::Jobs, "Jobs"),
+    ];
+}
+
 pub(crate) fn show(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
     ui.heading("ASHEN WORLD");
     ui.label(format!("{} survivors", p.world.player_character_count()));
     ui.separator();
+    selected_summary(ui, p);
+    ui.separator();
+
+    let tab_id = egui::Id::new("side_panel_tab");
+    let mut tab = ui.data(|d| d.get_temp::<Tab>(tab_id)).unwrap_or(Tab::Squad);
+    ui.horizontal(|ui| {
+        for (value, title) in Tab::ALL {
+            ui.selectable_value(&mut tab, value, title);
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(tab_id, tab));
+    ui.separator();
+
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            section(ui, "squad", "Squad", true, |ui| squad_section(ui, p));
-            section(ui, "selected", "Selected", true, |ui| {
-                selected_section(ui, p)
-            });
-            section(ui, "build", "Build", false, |ui| build_section(ui, p));
-            section(ui, "recruits", "Nearby recruits", false, |ui| {
-                recruit_section(ui, p)
-            });
+        .show(ui, |ui| match tab {
+            Tab::Squad => {
+                squad_section(ui, p);
+                ui.separator();
+                ui.label(egui::RichText::new("Nearby recruits").strong());
+                recruit_section(ui, p);
+            }
+            Tab::Build => build_section(ui, p),
+            Tab::Jobs => jobs_tab(ui, p),
         });
-}
-
-/// A collapsible panel section; egui remembers its open state per id.
-fn section(
-    ui: &mut egui::Ui,
-    id: &str,
-    title: &str,
-    default_open: bool,
-    body: impl FnOnce(&mut egui::Ui),
-) {
-    egui::CollapsingHeader::new(egui::RichText::new(title).heading())
-        .id_salt(id)
-        .default_open(default_open)
-        .show(ui, body);
 }
 
 fn squad_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
@@ -62,31 +76,36 @@ fn squad_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
     }
 }
 
-fn selected_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
+/// Always-visible details for the primary selected survivor.
+fn selected_summary(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
     let Some(selected) = p.world.selected_character() else {
         ui.label("No character selected");
         return;
     };
     let position = p.world.position(selected);
-    ui.label(character_label(selected));
+    ui.label(egui::RichText::new(character_label(selected)).strong());
     ui.small(format!("Position  {:.0}, {:.0}", position.x, position.z));
-    ui.add_space(6.0);
-    ui.label("Inventory");
     if let Some(inventory) = p.world.inventory(selected) {
         if inventory.is_empty() {
-            ui.small("Empty");
+            ui.small("Inventory: empty");
         } else {
-            for stack in inventory.items() {
-                ui.small(format!("{}  ×{}", stack.item, stack.count));
-            }
+            let items = inventory
+                .items()
+                .iter()
+                .map(|stack| format!("{} ×{}", stack.item, stack.count))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ui.small(format!("Inventory: {items}"));
         }
     }
+    ui.small("Left-click open terrain to move.");
+}
 
-    ui.add_space(8.0);
-    ui.label("Move order");
-    ui.small("Left-click open terrain to move this survivor.");
-
-    ui.separator();
+fn jobs_tab(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
+    let Some(selected) = p.world.selected_character() else {
+        ui.small("Select a survivor to manage jobs.");
+        return;
+    };
     job_panel(
         ui,
         selected,
@@ -274,7 +293,6 @@ fn job_panel(
     defs: &[content::BuildingDef],
     actions: &mut Vec<UiAction>,
 ) {
-    ui.heading("Jobs");
     let list = jobs.jobs(worker);
     if list.is_empty() {
         ui.small("No jobs. Add a building below.");
