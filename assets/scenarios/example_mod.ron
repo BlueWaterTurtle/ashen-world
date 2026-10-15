@@ -1,0 +1,5 @@
+(
+    name: "Example Mod",
+    description: "The default start with assets/mods/example_mod enabled.",
+    mods: Some(["example_mod"]),
+)

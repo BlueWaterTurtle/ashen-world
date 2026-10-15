@@ -28,10 +28,34 @@ game_client ──► asset_pipeline
 
 - **Preferred API:** `content::load_content(dir)` loads every domain from a flat directory of
   `<domain>.ron` files and returns a validated `Content`.
-- **Layered registry/cache** (`content::registry`, `content::cache`) is the mod-overlay mechanism
-  (`assets/content/base/<kind>/` then `mods/*/<kind>/`). It is deliberately kept separate: it
-  does no validation and is not used by the game yet. When mods are wired in, it should feed
-  `load_content` rather than being called directly by consumers.
+- **Mods** feed the same path: `content::load_content_with_mods(dir, &manifest, mods_dir)` loads
+  base content, overlays the mods enabled in `manifest.mods`, and validates the merged result
+  (uniqueness, per-record `validate`, cross-domain references). Consumers never call the
+  layered registry directly. `content::registry`/`content::cache` (a single-domain
+  `base/<kind>/` + `mods/*/<kind>/` mechanism) remain separate and unused by the game; mod
+  overlays are merged on the validated `Vec`s, not through them.
+
+## Mods
+
+- **Layout:** `assets/mods/<mod_id>/mod.ron` (`id` must equal the directory name and use only
+  `[A-Za-z0-9_-]`; `name`; optional `version`, `load_order` (default 0), `dependencies`) plus
+  optional `<domain>.ron` files in the same format as `assets/content`. See
+  `assets/mods/example_mod` and `assets/scenarios/example_mod.ron`.
+- **Enabling:** `mods: [...]` in the manifest, or `mods: Some([...])` in a scenario (replaces the
+  manifest list, like the other scenario lists). Omitted = no mods, so default behavior is unchanged.
+- **Order:** mods apply after base content, sorted by `(load_order, id)`; the order in the enable
+  list is irrelevant, so results never depend on file-system order.
+- **Overlay rules:** a record whose id already exists (in base or an earlier mod) replaces it in
+  place (override); a new id is appended. Duplicate ids within one layer are an error. Removal is
+  not supported. Only domains enabled in the manifest are read from mods.
+- **Dependencies:** each listed dependency must be enabled and loaded *before* the mod (lower
+  `load_order`), otherwise the mod is skipped.
+- **Failure behavior:** after each mod is merged, the whole content set is re-validated, so mod
+  records may reference base records and base records may reference mod records. A mod that is
+  missing, has an invalid descriptor/RON, fails validation (errors name the mod's file), or has
+  unmet dependencies is skipped and the content before it is kept. Startup never fails because of
+  a mod; skips are reported in the `StartupSummary`. Base content errors behave as before.
+
 - Each domain lives in `crates/content/src/domains/<domain>.rs` and implements `ContentDomain`:
   its file name, kind label, per-record `validate`, and declared `references` to other domains.
   Cross-references are resolved generically by `KnownIds`, so there is no per-pair validation code.
@@ -73,11 +97,11 @@ Composition lives in `game_client::bootstrap` (no winit/wgpu) and runs in this o
 
 1. **Scenario selected** – `ASHEN_SCENARIO` (name or path, default `default`). Missing/invalid file: built-in default scenario.
 2. **Manifest resolved** – the scenario's `manifest` (else `manifest.ron`), then inline `content_domains`/`systems` replace the manifest's lists. Missing/invalid manifest: default manifest.
-3. **Content loaded** – only enabled domains. Failure: default `WorldConfig` and no building defs. References into disabled domains are skipped and reported as warnings.
+3. **Content loaded** – only enabled domains, then enabled mods overlaid (`assets/mods`, see Mods) and the merged result validated; bad mods are skipped. Failure of base content: default `WorldConfig` and no building defs. References into disabled domains are skipped and reported as warnings.
 4. **Schedule built** – from manifest systems. Unknown names are ignored; an empty result uses the standard schedule.
 5. **World overrides applied** – scenario `world` values on top of the config (also after a content fallback).
 
-A structured `StartupSummary` printed at boot lists scenario (requested vs fallback), manifest, domains, systems, any fallbacks and warnings.
+A structured `StartupSummary` printed at boot lists scenario (requested vs fallback), manifest, domains, systems, loaded mods, skipped mods with reasons, overrides (which mod replaced which id), any fallbacks and warnings.
 
 ## Adding a content domain
 

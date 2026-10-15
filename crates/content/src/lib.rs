@@ -2,8 +2,8 @@
 //!
 //! Preferred API: [`load_content`] returns a fully validated [`Content`] from a flat
 //! directory of `<domain>.ron` files. The layered [`registry`]/[`cache`] loader is the
-//! lower-level mod-overlay mechanism for a single domain; it does no validation and is
-//! not used by the game yet.
+//! lower-level single-domain overlay mechanism; it is not used by the game. Mod overlays
+//! are applied by [`load_content_with_mods`] (see [`mods`]), which validates the merged result.
 
 use serde::Deserialize;
 use std::fmt;
@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 pub mod cache;
 pub mod domains;
 pub mod manifest;
+pub mod mods;
 pub mod registry;
 pub mod scenario;
 
@@ -20,6 +21,7 @@ pub use domains::{
     Reference, StatModifier, UnitArchetype,
 };
 pub use manifest::Manifest;
+pub use mods::{load_content_with_mods, ModDescriptor, ModOverride, ModReport, SkippedMod};
 pub use scenario::{Scenario, WorldOverrides};
 
 #[derive(Debug)]
@@ -131,37 +133,51 @@ pub fn load_content_with(
 }
 
 /// Like [`load_content_with`], also returning a warning for every reference into a disabled
-/// domain (skipped, never an error).
+/// domain (skipped, never an error). Ignores `manifest.mods`; see
+/// [`mods::load_content_with_mods`].
 pub fn load_content_with_warnings(
     dir: impl AsRef<Path>,
     manifest: &Manifest,
 ) -> Result<(Content, Vec<String>), ContentError> {
     let dir = dir.as_ref();
-    let mut c = Content::default();
-    let mut unchecked: Vec<&'static str> = Vec::new();
-    let mut paths = (PathBuf::new(), PathBuf::new());
+    let c = load_base(dir, manifest)?;
+    let warnings = check_content(
+        &c,
+        manifest,
+        &dir.join(format!("{}.ron", UnitArchetype::NAME)),
+        &dir.join(format!("{}.ron", BuildingDef::NAME)),
+    )?;
+    Ok((c, warnings))
+}
 
+/// Per-file validated base layer of the enabled domains; references are not yet checked.
+fn load_base(dir: &Path, manifest: &Manifest) -> Result<Content, ContentError> {
+    let mut c = Content::default();
     macro_rules! domain {
         ($field:ident, $ty:ty) => {
             if manifest.has_domain(<$ty>::NAME) {
-                let (items, path) = load_domain::<$ty>(dir)?;
-                c.$field = items;
-                path
-            } else {
-                unchecked.push(<$ty>::KIND);
-                PathBuf::new()
+                c.$field = load_domain::<$ty>(dir)?.0;
             }
         };
     }
     domain!(factions, Faction);
-    paths.0 = domain!(units, UnitArchetype);
+    domain!(units, UnitArchetype);
     domain!(biomes, Biome);
     domain!(races, Race);
     domain!(behaviors, Behavior);
-    paths.1 = domain!(buildings, BuildingDef);
+    domain!(buildings, BuildingDef);
     domain!(crops, Crop);
-    let (units_path, buildings_path) = paths;
+    Ok(c)
+}
 
+/// Cross-domain reference check on a (merged) `Content`; returns disabled-domain warnings.
+/// `units_path`/`buildings_path` identify the source in errors.
+fn check_content(
+    c: &Content,
+    manifest: &Manifest,
+    units_path: &Path,
+    buildings_path: &Path,
+) -> Result<Vec<String>, ContentError> {
     let mut ids = KnownIds::default();
     ids.register(&c.factions);
     ids.register(&c.units);
@@ -170,14 +186,27 @@ pub fn load_content_with_warnings(
     ids.register(&c.behaviors);
     ids.register(&c.buildings);
     ids.register(&c.crops);
-    for kind in unchecked {
-        ids.mark_unchecked(kind);
+    macro_rules! unchecked {
+        ($($ty:ty),*) => {$(
+            if !manifest.has_domain(<$ty>::NAME) {
+                ids.mark_unchecked(<$ty>::KIND);
+            }
+        )*};
     }
-    check_refs(&ids, &c.buildings, &buildings_path)?;
-    check_refs(&ids, &c.units, &units_path)?;
+    unchecked!(
+        Faction,
+        UnitArchetype,
+        Biome,
+        Race,
+        Behavior,
+        BuildingDef,
+        Crop
+    );
+    check_refs(&ids, &c.buildings, buildings_path)?;
+    check_refs(&ids, &c.units, units_path)?;
     let mut warnings = ids.disabled_references(&c.buildings);
     warnings.extend(ids.disabled_references(&c.units));
-    Ok((c, warnings))
+    Ok(warnings)
 }
 
 #[cfg(test)]
@@ -295,6 +324,7 @@ mod tests {
         let m = Manifest {
             content_domains: vec!["factions".into(), "races".into(), "behaviors".into()],
             systems: vec![],
+            mods: vec![],
         };
         let c = load_content_with(assets_dir(), &m).unwrap();
         assert!(!c.factions.is_empty() && !c.races.is_empty());
@@ -306,6 +336,7 @@ mod tests {
         let m = Manifest {
             content_domains: vec!["units".into(), "buildings".into()],
             systems: vec![],
+            mods: vec![],
         };
         let (c, warnings) = load_content_with_warnings(assets_dir(), &m).unwrap();
         assert!(!c.units.is_empty());

@@ -12,6 +12,9 @@ pub struct Manifest {
     pub content_domains: Vec<String>,
     #[serde(default = "default_systems")]
     pub systems: Vec<String>,
+    /// Ids of enabled mods (`assets/mods/<id>/`); omitted = none.
+    #[serde(default)]
+    pub mods: Vec<String>,
 }
 
 fn default_domains() -> Vec<String> {
@@ -41,6 +44,7 @@ impl Default for Manifest {
         Self {
             content_domains: default_domains(),
             systems: default_systems(),
+            mods: Vec::new(),
         }
     }
 }

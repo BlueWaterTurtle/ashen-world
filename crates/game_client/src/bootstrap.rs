@@ -20,6 +20,8 @@ pub struct StartupSummary {
     pub unknown_systems: Vec<String>,
     pub content_fallback: Option<String>,
     pub warnings: Vec<String>,
+    /// Mods applied (in order), mods skipped with reasons, and records they replaced.
+    pub mods: content::ModReport,
 }
 
 impl StartupSummary {
@@ -28,6 +30,7 @@ impl StartupSummary {
             || self.manifest_fallback.is_some()
             || self.content_fallback.is_some()
             || !self.unknown_systems.is_empty()
+            || !self.mods.skipped.is_empty()
     }
 }
 
@@ -62,6 +65,25 @@ impl fmt::Display for StartupSummary {
         for n in &self.unknown_systems {
             writeln!(f, "startup: unknown system '{n}' ignored")?;
         }
+        if !self.mods.loaded.is_empty() {
+            let list: Vec<String> = self
+                .mods
+                .loaded
+                .iter()
+                .map(|m| format!("{} {}", m.id, m.version))
+                .collect();
+            writeln!(f, "startup: mods [{}]", list.join(", "))?;
+        }
+        for s in &self.mods.skipped {
+            writeln!(f, "startup: mod '{}' skipped: {}", s.id, s.reason)?;
+        }
+        for o in &self.mods.overrides {
+            writeln!(
+                f,
+                "startup: mod '{}' overrides {} '{}'",
+                o.mod_id, o.domain, o.id
+            )?;
+        }
         for w in &self.warnings {
             writeln!(f, "startup: warning: {w}")?;
         }
@@ -76,7 +98,7 @@ pub struct Startup {
     pub summary: StartupSummary,
 }
 
-/// Compose startup from `assets_root` (`content/` and `scenarios/`); `selector` defaults to
+/// Compose startup from `assets_root` (`content/`, `scenarios/` and `mods/`); `selector` defaults to
 /// `default`. Never fails: every step falls back and records it in the summary.
 pub fn bootstrap(assets_root: &Path, selector: Option<&str>) -> Startup {
     let content_dir = assets_root.join("content");
@@ -88,10 +110,12 @@ pub fn bootstrap(assets_root: &Path, selector: Option<&str>) -> Startup {
 
     let mut warnings = Vec::new();
     let mut content_fallback = None;
+    let mut mods = content::ModReport::default();
     let (mut config, building_defs) =
-        match content::load_content_with_warnings(&content_dir, &manifest) {
-            Ok((c, w)) => {
+        match content::load_content_with_mods(&content_dir, &manifest, assets_root.join("mods")) {
+            Ok((c, w, report)) => {
                 warnings = w;
+                mods = report;
                 (
                     WorldConfig {
                         behaviors: behaviors_from_content(&c),
@@ -119,6 +143,7 @@ pub fn bootstrap(assets_root: &Path, selector: Option<&str>) -> Startup {
         unknown_systems,
         content_fallback,
         warnings,
+        mods,
     };
     Startup {
         config,
@@ -209,6 +234,7 @@ mod tests {
         assert_eq!(s.summary.content_domains.len(), 7);
         assert!(!s.building_defs.is_empty());
         assert!(s.summary.warnings.is_empty());
+        assert_eq!(s.summary.mods, content::ModReport::default());
         assert!(s.summary.to_string().contains("fallbacks: none"));
     }
 
@@ -306,5 +332,58 @@ mod tests {
         let s = bootstrap(&root, Some("t"));
         assert!(!s.summary.warnings.is_empty());
         assert!(s.summary.to_string().contains("warning:"));
+    }
+
+    #[test]
+    fn example_mod_scenario_overlays_content() {
+        let s = bootstrap(&assets(), Some("example_mod"));
+        assert!(!s.summary.any_fallback(), "{}", s.summary);
+        assert_eq!(s.summary.mods.loaded[0].id, "example_mod");
+        assert!(s
+            .summary
+            .mods
+            .overrides
+            .iter()
+            .any(|o| o.domain == "units" && o.id == "wanderer"));
+        let text = s.summary.to_string();
+        assert!(text.contains("mods [example_mod 0.1.0]"), "{text}");
+        assert!(text.contains("overrides units 'wanderer'"), "{text}");
+        let base = bootstrap(&assets(), None);
+        assert_ne!(s.config.behaviors, base.config.behaviors);
+        assert_eq!(s.config.agent_count, base.config.agent_count);
+    }
+
+    #[test]
+    fn missing_mod_is_skipped_without_failing_startup() {
+        let root = std::env::temp_dir().join("ashen_world_bootstrap_missing_mod");
+        std::fs::create_dir_all(root.join("scenarios")).unwrap();
+        std::fs::create_dir_all(root.join("content")).unwrap();
+        for f in [
+            "factions",
+            "units",
+            "biomes",
+            "races",
+            "behaviors",
+            "buildings",
+            "crops",
+        ] {
+            let name = format!("{f}.ron");
+            std::fs::copy(
+                assets().join("content").join(&name),
+                root.join("content").join(&name),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("scenarios/t.ron"),
+            r#"(name: "T", mods: Some(["ghost"]))"#,
+        )
+        .unwrap();
+        let s = bootstrap(&root, Some("t"));
+        assert!(s.summary.content_fallback.is_none());
+        assert_eq!(s.summary.mods.skipped.len(), 1);
+        assert!(s.summary.any_fallback());
+        assert!(s.summary.to_string().contains("mod 'ghost' skipped"));
+        assert!(!s.building_defs.is_empty());
     }
 }

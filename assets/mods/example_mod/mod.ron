@@ -1,0 +1,8 @@
+// Example mod. Enable it with a scenario: `mods: Some(["example_mod"])`.
+(
+    id: "example_mod",
+    name: "Example Mod",
+    version: "0.1.0",
+    load_order: 0,
+    dependencies: [],
+)
