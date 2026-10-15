@@ -488,6 +488,25 @@ impl Buildings {
             .map_or(0, |s| s.required.saturating_sub(s.delivered))
     }
 
+    /// Nearest building (within `radius` of the site) holding the site's
+    /// material in its output stock; ties go to the lowest index.
+    pub fn find_material_source(&self, site: usize, radius: f32) -> Option<usize> {
+        let site = self.sites.get(site).filter(|s| s.completed.is_none())?;
+        let origin = site.worker_position();
+        let mut best: Option<(usize, f32)> = None;
+        for (index, building) in self.buildings.iter().enumerate() {
+            if building.outputs.count_of(site.material.id()) == 0 {
+                continue;
+            }
+            let p = building.worker_slot_position(0);
+            let dist = ((p.x - origin.x).powi(2) + (p.z - origin.z).powi(2)).sqrt();
+            if dist <= radius && best.is_none_or(|(_, d)| dist < d) {
+                best = Some((index, dist));
+            }
+        }
+        best.map(|(index, _)| index)
+    }
+
     /// Whether `site_pickup` from `source` would move anything.
     pub fn can_supply_site(&self, source: usize, site: usize) -> bool {
         match (self.buildings.get(source), self.sites.get(site)) {
@@ -1257,5 +1276,64 @@ mod tests {
             amount_mm: 3000,
         };
         assert!(b.terrain_edit_is_allowed(1, &edits, elsewhere));
+    }
+
+    fn ore_store(b: &mut Buildings, x: i32, z: i32, ore: u32) -> usize {
+        let index = b
+            .place_with_logistics(
+                1,
+                &TerrainEdits::default(),
+                "store",
+                fp(x, z, 1, 1),
+                &PlacementRules::default(),
+                BuildingLogistics {
+                    input_slots: 1,
+                    output_slots: 1,
+                    stack_limit: 10,
+                    input_resources: vec!["iron_ore".into()],
+                    output_resources: vec!["iron_ore".into()],
+                    is_storage: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        b.buildings[index].outputs.insert("iron_ore", ore);
+        index
+    }
+
+    fn ore_site(b: &mut Buildings) -> usize {
+        b.request_construction(
+            1,
+            &TerrainEdits::default(),
+            "house",
+            fp(0, 0, 2, 2),
+            &PlacementRules::default(),
+            BuildingLogistics::default(),
+            ResourceKind::IronOre,
+            1,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn material_source_is_nearest_stocked_building_within_radius() {
+        let mut b = Buildings::default();
+        let site = ore_site(&mut b);
+        let far = ore_store(&mut b, 20, 0, 5);
+        let empty = ore_store(&mut b, 4, 0, 0);
+        assert_eq!(b.find_material_source(site, 30.0), Some(far));
+        let near = ore_store(&mut b, 8, 0, 1);
+        assert_eq!(b.find_material_source(site, 30.0), Some(near));
+        assert_ne!(Some(empty), b.find_material_source(site, 30.0));
+        assert_eq!(b.find_material_source(site, 5.0), None);
+    }
+
+    #[test]
+    fn material_source_ignores_finished_sites() {
+        let mut b = Buildings::default();
+        let site = ore_site(&mut b);
+        ore_store(&mut b, 8, 0, 1);
+        b.sites[site].completed = Some(0);
+        assert_eq!(b.find_material_source(site, 30.0), None);
     }
 }
