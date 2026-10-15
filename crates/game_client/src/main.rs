@@ -1,6 +1,7 @@
 mod assets;
 mod bootstrap;
 mod camera;
+mod context_menu;
 mod mesh;
 mod renderer;
 mod save;
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use camera::Camera;
+use context_menu::ContextTarget;
 use core_sim::{
     BuildingLogistics, Buildings, Footprint, Job, Jobs, PlacementRules, ResourceKind, Schedule,
     TerrainEdit, WorkerActivity, World, WorldPos, TICK_DT,
@@ -104,6 +106,7 @@ struct Input {
     last_cursor: Option<(f64, f64)>,
     left_press: Option<(f64, f64)>,
     selection_rect: Option<[f32; 4]>,
+    right_press: Option<(f64, f64)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -441,6 +444,96 @@ impl App {
             return;
         }
 
+        self.move_selected_to(ground.x, ground.z);
+    }
+
+    /// Open the right-click context menu for whatever lies under the cursor, for the selected worker.
+    fn handle_context_click(&mut self, screen_x: f32, screen_y: f32) {
+        if self.editor.active || self.build_mode.is_some() {
+            return;
+        }
+        let Some(worker) = self.world.selected_character() else {
+            return;
+        };
+        let Some(window) = &self.window else {
+            return;
+        };
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let (width, height) = (size.width as f32, size.height as f32);
+        let Some(mut hit) = self.camera.ground_intersection(
+            screen_x,
+            screen_y,
+            width,
+            height,
+            self.camera.target.y,
+        ) else {
+            return;
+        };
+        for _ in 0..3 {
+            let y = self
+                .world
+                .terrain_edits()
+                .height(self.world.seed, hit.x, hit.z);
+            match self
+                .camera
+                .ground_intersection(screen_x, screen_y, width, height, y)
+            {
+                Some(refined) => hit = refined,
+                None => break,
+            }
+        }
+        let cell = (hit.x.floor() as i32, hit.z.floor() as i32);
+        let target = if let Some(index) = self
+            .buildings
+            .buildings
+            .iter()
+            .position(|b| b.footprint.contains(cell))
+        {
+            ContextTarget::Building(index)
+        } else if let Some(site) = self
+            .buildings
+            .sites
+            .iter()
+            .position(|s| s.completed.is_none() && s.footprint.contains(cell))
+        {
+            ContextTarget::Site(site)
+        } else {
+            ContextTarget::Ground { x: hit.x, z: hit.z }
+        };
+        let entries = context_menu::available_actions(
+            target,
+            worker,
+            &self.jobs,
+            &self.buildings,
+            &self.building_defs,
+        );
+        let title = context_menu::title(target, &self.buildings, &self.building_defs);
+        if let Some(ui) = &mut self.ui {
+            ui.open_context_menu((screen_x, screen_y), title, entries);
+        }
+    }
+
+    fn inspect_building(&mut self, index: usize) {
+        let Some(building) = self.buildings.buildings.get(index) else {
+            return;
+        };
+        let name = self
+            .building_defs
+            .iter()
+            .find(|definition| definition.id == building.def)
+            .map_or(building.def.as_str(), |definition| definition.name.as_str());
+        let staffed = building.workers.iter().flatten().count();
+        self.build_status = Some(format!(
+            "{name} #{index}: {staffed}/{} workers, {:?}.",
+            building.workers.len(),
+            building.work_status()
+        ));
+    }
+
+    fn move_selected_to(&mut self, x: f32, z: f32) {
         let selection = if self.selected_entities.is_empty() {
             self.world
                 .selected_character()
@@ -459,7 +552,7 @@ impl App {
                     &mut self.world,
                     &mut self.buildings,
                     entity,
-                    WorldPos::new(ground.x + offset_x, 0.0, ground.z + offset_z),
+                    WorldPos::new(x + offset_x, 0.0, z + offset_z),
                 );
             }
         }
@@ -585,6 +678,8 @@ impl App {
                 UiAction::MoveJobUp { worker, index } => self.jobs.move_up(worker, index),
                 UiAction::MoveJobDown { worker, index } => self.jobs.move_down(worker, index),
                 UiAction::ResumeJobs(worker) => self.jobs.resume(worker),
+                UiAction::MoveSelected { x, z } => self.move_selected_to(x, z),
+                UiAction::InspectBuilding(index) => self.inspect_building(index),
                 UiAction::CancelBuilding => {
                     self.build_mode = None;
                     self.build_status = None;
@@ -805,7 +900,11 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     match code {
                         KeyCode::Escape if down => {
-                            if self.editor.active {
+                            let menu_closed =
+                                self.ui.as_mut().is_some_and(|ui| ui.close_context_menu());
+                            if menu_closed {
+                                // Escape only dismissed the context menu.
+                            } else if self.editor.active {
                                 self.editor.active = false;
                                 self.editor.slope_start = None;
                                 self.build_status = None;
@@ -931,7 +1030,22 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Right || button == MouseButton::Middle {
                     self.input.orbiting = state == ElementState::Pressed;
-                    self.input.last_cursor = None;
+                    if button == MouseButton::Right {
+                        if state == ElementState::Pressed {
+                            self.input.right_press = self.input.last_cursor;
+                        } else if let (Some(start), Some(end)) =
+                            (self.input.right_press.take(), self.input.last_cursor)
+                        {
+                            let dx = (end.0 - start.0) as f32;
+                            let dy = (end.1 - start.1) as f32;
+                            if dx * dx + dy * dy < 64.0 {
+                                self.handle_context_click(end.0 as f32, end.1 as f32);
+                            }
+                        }
+                    }
+                    if button != MouseButton::Right || state == ElementState::Released {
+                        self.input.last_cursor = None;
+                    }
                 } else if button == MouseButton::Left && state == ElementState::Pressed {
                     self.input.left_press = self.input.last_cursor;
                     self.input.selection_rect = None;

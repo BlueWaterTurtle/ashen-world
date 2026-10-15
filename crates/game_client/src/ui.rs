@@ -1,3 +1,4 @@
+use crate::context_menu::ContextEntry;
 use core_sim::{
     fertility_at, resource_richness_at, Buildings, Entity, Job, JobStatus, Jobs, ResourceKind,
     WorkStatus, World, RECRUIT_MAX_DISTANCE,
@@ -8,7 +9,7 @@ use std::sync::Arc;
 use winit::event::WindowEvent;
 use winit::window::Window;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
     Select(Entity),
     Recruit(Entity),
@@ -41,6 +42,21 @@ pub enum UiAction {
         index: usize,
     },
     ResumeJobs(Entity),
+    /// Move the selected squad so its anchor stands at this ground point.
+    MoveSelected {
+        x: f32,
+        z: f32,
+    },
+    InspectBuilding(usize),
+}
+
+/// An open right-click menu: physical-pixel cursor position plus its entries.
+struct OpenContextMenu {
+    pos: (f32, f32),
+    title: String,
+    entries: Vec<ContextEntry>,
+    /// Skip outside-click dismissal on the frame the menu opens.
+    fresh: bool,
 }
 
 pub struct HudData<'a> {
@@ -62,6 +78,7 @@ pub struct GameUi {
     paint_jobs: Vec<ClippedPrimitive>,
     textures_delta: TexturesDelta,
     selected_building: Option<String>,
+    context_menu: Option<OpenContextMenu>,
 }
 
 impl GameUi {
@@ -84,7 +101,27 @@ impl GameUi {
             paint_jobs: Vec::new(),
             textures_delta: TexturesDelta::default(),
             selected_building: None,
+            context_menu: None,
         }
+    }
+
+    pub fn open_context_menu(
+        &mut self,
+        pos: (f32, f32),
+        title: String,
+        entries: Vec<ContextEntry>,
+    ) {
+        self.context_menu = Some(OpenContextMenu {
+            pos,
+            title,
+            entries,
+            fresh: true,
+        });
+    }
+
+    /// Closes the context menu; returns whether one was open.
+    pub fn close_context_menu(&mut self) -> bool {
+        self.context_menu.take().is_some()
     }
 
     pub fn on_window_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
@@ -106,6 +143,7 @@ impl GameUi {
         let input = self.state.take_egui_input(window);
         let mut actions = Vec::new();
         let selected_building = &mut self.selected_building;
+        let context_menu = &mut self.context_menu;
         let output = self.context.run(input, |ctx| {
             let size = window.inner_size();
             let scale = window.scale_factor() as f32;
@@ -368,6 +406,39 @@ impl GameUi {
                             });
                     }
                 });
+
+            if let Some(menu) = context_menu.as_mut() {
+                let mut close = false;
+                let response = egui::Area::new(Id::new("context_menu"))
+                    .order(Order::Foreground)
+                    .fixed_pos(Pos2::new(menu.pos.0 / scale, menu.pos.1 / scale))
+                    .constrain(true)
+                    .show(ctx, |ui| {
+                        popover_frame().show(ui, |ui| {
+                            ui.set_min_width(170.0);
+                            ui.label(egui::RichText::new(&menu.title).strong().color(ACCENT));
+                            ui.separator();
+                            for entry in &menu.entries {
+                                if ui.selectable_label(false, &entry.label).clicked() {
+                                    if let Some(action) = &entry.action {
+                                        actions.push(action.clone());
+                                    }
+                                    close = true;
+                                }
+                            }
+                        });
+                    });
+                if !menu.fresh && ctx.input(|i| i.pointer.any_pressed()) {
+                    let outside = ctx
+                        .input(|i| i.pointer.interact_pos())
+                        .is_some_and(|p| !response.response.rect.contains(p));
+                    close |= outside;
+                }
+                menu.fresh = false;
+                if close {
+                    *context_menu = None;
+                }
+            }
         });
         self.state
             .handle_platform_output(window, output.platform_output);
@@ -440,6 +511,21 @@ fn panel_frame() -> egui::Frame {
         .shadow(egui::epaint::Shadow {
             offset: egui::vec2(-2.0, 0.0),
             blur: 12.0,
+            spread: 0.0,
+            color: Color32::from_black_alpha(120),
+        })
+}
+
+/// Small rounded popover used by the right-click context menu.
+fn popover_frame() -> egui::Frame {
+    egui::Frame::none()
+        .fill(PANEL_FILL)
+        .stroke(Stroke::new(1.0_f32, ACCENT))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::same(8.0))
+        .shadow(egui::epaint::Shadow {
+            offset: egui::vec2(2.0, 3.0),
+            blur: 10.0,
             spread: 0.0,
             color: Color32::from_black_alpha(120),
         })
