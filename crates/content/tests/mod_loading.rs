@@ -16,8 +16,16 @@ fn write(path: &Path, s: &str) {
 #[test]
 fn parses_base_ron() {
     let root = tempfile::tempdir().unwrap();
-    write(&root.path().join("assets/content/base/buildings/wall.ron"), &building("building:stone_wall", "Wall"));
-    let reg = BuildingRegistry::load_layered(root.path(), "buildings", &root.path().join(".cache/content")).unwrap();
+    write(
+        &root.path().join("assets/content/base/buildings/wall.ron"),
+        &building("building:stone_wall", "Wall"),
+    );
+    let reg = BuildingRegistry::load_layered(
+        root.path(),
+        "buildings",
+        &root.path().join(".cache/content"),
+    )
+    .unwrap();
     assert_eq!(reg.len(), 1);
     assert_eq!(reg.get("building:stone_wall").unwrap().name, "Wall");
 }
@@ -26,9 +34,18 @@ fn parses_base_ron() {
 fn mod_overrides_and_appends() {
     let root = tempfile::tempdir().unwrap();
     let p = root.path();
-    write(&p.join("assets/content/base/buildings/wall.ron"), &building("building:stone_wall", "Wall"));
-    write(&p.join("mods/a/buildings/wall.ron"), &building("building:stone_wall", "Modded Wall"));
-    write(&p.join("mods/a/buildings/tower.ron"), &building("building:tower", "Tower"));
+    write(
+        &p.join("assets/content/base/buildings/wall.ron"),
+        &building("building:stone_wall", "Wall"),
+    );
+    write(
+        &p.join("mods/a/buildings/wall.ron"),
+        &building("building:stone_wall", "Modded Wall"),
+    );
+    write(
+        &p.join("mods/a/buildings/tower.ron"),
+        &building("building:tower", "Tower"),
+    );
     let reg = BuildingRegistry::load_layered(p, "buildings", &p.join(".cache/content")).unwrap();
     assert_eq!(reg.len(), 2);
     assert_eq!(reg.get("building:stone_wall").unwrap().name, "Modded Wall");
@@ -50,7 +67,8 @@ fn cache_generated_and_stale_detected() {
     // Make the source newer than the cache: stale, and reload picks up the edit.
     write(&src, &building("building:stone_wall", "Edited"));
     let f = fs::OpenOptions::new().write(true).open(&src).unwrap();
-    f.set_modified(SystemTime::now() + Duration::from_secs(10)).unwrap();
+    f.set_modified(SystemTime::now() + Duration::from_secs(10))
+        .unwrap();
     assert!(!is_cache_valid(&src, &bin));
     let reg = BuildingRegistry::load_layered(p, "buildings", &cache).unwrap();
     assert_eq!(reg.get("building:stone_wall").unwrap().name, "Edited");

@@ -123,8 +123,8 @@ dependencies = [
  "glam",
  "gltf",
  "image",
+ "ron",
  "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -399,7 +399,6 @@ dependencies = [
  "bincode",
  "ron",
  "serde",
- "serde_json",
  "tempfile",
 ]
 

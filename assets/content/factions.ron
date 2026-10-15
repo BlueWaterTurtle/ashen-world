@@ -1,4 +1,12 @@
 [
-  { id: "wanderers", name: "Wanderers", hostile_by_default: false },
-  { id: "raiders", name: "Dust Raiders", hostile_by_default: true },
+    (
+        id: "wanderers",
+        name: "Wanderers",
+        hostile_by_default: false,
+    ),
+    (
+        id: "raiders",
+        name: "Dust Raiders",
+        hostile_by_default: true,
+    ),
 ]
