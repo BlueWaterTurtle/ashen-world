@@ -182,6 +182,7 @@ impl App {
                     seed: self.world.seed,
                     camera: &self.camera,
                     selection_rect: self.input.selection_rect,
+                    terrain_editor: &self.editor,
                 },
             ),
             _ => Vec::new(),
