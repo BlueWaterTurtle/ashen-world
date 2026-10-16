@@ -1178,6 +1178,41 @@ mod tests {
     }
 
     #[test]
+    fn construction_waits_for_missing_materials_before_progressing() {
+        let (mut world, mut buildings, mut jobs, w, store, site) = construction_setup();
+        assert_eq!(
+            buildings.buildings[store]
+                .outputs
+                .remove_resource("wood", 20),
+            20
+        );
+
+        build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
+        build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
+        assert_eq!(buildings.sites[site].delivered, 10);
+        assert_eq!(buildings.site_needs(site), 5);
+        assert_eq!(buildings.sites[site].progress, 0.0);
+        assert_eq!(buildings.sites[site].completed, None);
+
+        build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
+        assert_eq!(
+            jobs.job_status(w, 0, &buildings),
+            Some(JobStatus::Blocked(WorkStatus::MissingInput))
+        );
+        assert_eq!(buildings.sites[site].progress, 0.0);
+
+        buildings.buildings[store]
+            .outputs
+            .insert_resource("wood", 5);
+        for _ in 0..3 {
+            build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
+        }
+        assert_eq!(buildings.sites[site].delivered, 15);
+        assert!(buildings.sites[site].progress > 0.0);
+        assert!(buildings.sites[site].completed.is_some());
+    }
+
+    #[test]
     fn site_is_reserved_by_one_worker() {
         let (world, mut buildings, mut jobs, w, store, site) = construction_setup();
         let mut world = world;
