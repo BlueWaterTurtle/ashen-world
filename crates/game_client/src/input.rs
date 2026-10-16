@@ -2,250 +2,18 @@
 //! terrain-editing changes on `App`.
 
 use core_sim::{BuildingLogistics, Footprint, PlacementRules};
-use glam::Vec3;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
+use crate::actions::key_action;
 use crate::context_menu::{self, ContextTarget};
 use crate::picking::select_players_in_rect;
-use crate::terrain_editor::TerrainTool;
-use crate::ui::UiAction;
 use crate::App;
 
 /// Squared cursor travel (in pixels) above which a left press becomes a drag selection
 /// and a right press stops counting as a context-menu click.
 const DRAG_THRESHOLD_SQ: f64 = 64.0;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BindingGroup {
-    Terrain,
-    Camera,
-    Build,
-    SaveLoad,
-    General,
-}
-
-impl BindingGroup {
-    /// Display order in the key list.
-    pub(crate) const ALL: [BindingGroup; 5] = [
-        BindingGroup::Terrain,
-        BindingGroup::Camera,
-        BindingGroup::Build,
-        BindingGroup::SaveLoad,
-        BindingGroup::General,
-    ];
-
-    pub(crate) fn title(self) -> &'static str {
-        match self {
-            BindingGroup::Terrain => "Terrain",
-            BindingGroup::Camera => "Camera",
-            BindingGroup::Build => "Build",
-            BindingGroup::SaveLoad => "Save / Load",
-            BindingGroup::General => "General",
-        }
-    }
-}
-
-/// Terrain tool hotkeys: the canonical source for both key handling and the panel buttons.
-pub(crate) struct TerrainToolKey {
-    pub(crate) code: KeyCode,
-    pub(crate) key: &'static str,
-    pub(crate) tool: TerrainTool,
-}
-
-pub(crate) const TERRAIN_TOOL_KEYS: [TerrainToolKey; 5] = [
-    TerrainToolKey {
-        code: KeyCode::F1,
-        key: "F1",
-        tool: TerrainTool::Raise,
-    },
-    TerrainToolKey {
-        code: KeyCode::F2,
-        key: "F2",
-        tool: TerrainTool::Lower,
-    },
-    TerrainToolKey {
-        code: KeyCode::F3,
-        key: "F3",
-        tool: TerrainTool::Flatten,
-    },
-    TerrainToolKey {
-        code: KeyCode::F4,
-        key: "F4",
-        tool: TerrainTool::Smooth,
-    },
-    TerrainToolKey {
-        code: KeyCode::F5,
-        key: "F5",
-        tool: TerrainTool::Slope,
-    },
-];
-
-/// Parses a key press into a shared command, or `None` if the key is handled elsewhere
-/// (camera movement, Escape, slot selection). Execution lives in `App::apply_ui_action`.
-pub(crate) fn key_command(code: KeyCode, editor_active: bool, repeat: bool) -> Option<UiAction> {
-    if editor_active {
-        if let Some(key) = TERRAIN_TOOL_KEYS.iter().find(|key| key.code == code) {
-            return Some(UiAction::SetTerrainTool(key.tool));
-        }
-    }
-    match code {
-        KeyCode::KeyT => Some(UiAction::ToggleTerrainEditor),
-        KeyCode::F5 => Some(UiAction::QuickSave),
-        KeyCode::F9 => Some(UiAction::QuickLoad),
-        KeyCode::F10 if !repeat => Some(UiAction::ToggleTerrainPanel),
-        KeyCode::BracketLeft if editor_active => Some(UiAction::AdjustBrushRadius(-1)),
-        KeyCode::BracketRight if editor_active => Some(UiAction::AdjustBrushRadius(1)),
-        KeyCode::Minus if editor_active => Some(UiAction::AdjustBrushStrength(-250)),
-        KeyCode::Equal if editor_active => Some(UiAction::AdjustBrushStrength(250)),
-        _ => None,
-    }
-}
-
-pub(crate) struct Binding {
-    pub(crate) key: &'static str,
-    pub(crate) description: &'static str,
-    pub(crate) group: BindingGroup,
-    pub(crate) terrain_relevant: bool,
-}
-
-// Display table only: keep it in sync with `key_command`, `handle_key` and `handle_mouse_button`.
-pub(crate) const BINDINGS: &[Binding] = &[
-    Binding {
-        key: "T",
-        description: "Toggle terrain editing",
-        group: BindingGroup::Terrain,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "F1–F4",
-        description: "Raise, lower, flatten, or smooth terrain while editing",
-        group: BindingGroup::Terrain,
-        terrain_relevant: true,
-    },
-    Binding {
-        key: "F5 (editing)",
-        description: "Select slope tool (quick-save is F5 when not editing)",
-        group: BindingGroup::Terrain,
-        terrain_relevant: true,
-    },
-    Binding {
-        key: "[ / ]",
-        description: "Decrease / increase brush radius while editing",
-        group: BindingGroup::Terrain,
-        terrain_relevant: true,
-    },
-    Binding {
-        key: "- / =",
-        description: "Decrease / increase brush strength while editing",
-        group: BindingGroup::Terrain,
-        terrain_relevant: true,
-    },
-    Binding {
-        key: "Left mouse (editing)",
-        description: "Apply the selected terrain tool at the cursor",
-        group: BindingGroup::Terrain,
-        terrain_relevant: true,
-    },
-    Binding {
-        key: "Left mouse",
-        description:
-            "Place the selected building when placing; otherwise select, move, or drag-select",
-        group: BindingGroup::Build,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "A / ←",
-        description: "Pan camera left",
-        group: BindingGroup::Camera,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "D / →",
-        description: "Pan camera right",
-        group: BindingGroup::Camera,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "W / ↑",
-        description: "Pan camera forward",
-        group: BindingGroup::Camera,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "S / ↓",
-        description: "Pan camera back",
-        group: BindingGroup::Camera,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "Q / E",
-        description: "Orbit camera left / right",
-        group: BindingGroup::Camera,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "Right / middle mouse drag",
-        description: "Orbit camera",
-        group: BindingGroup::Camera,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "Mouse wheel",
-        description: "Zoom camera",
-        group: BindingGroup::Camera,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "F5 (not editing)",
-        description: "Quick-save (selects the slope tool while terrain editing)",
-        group: BindingGroup::SaveLoad,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "F9",
-        description: "Quick-load",
-        group: BindingGroup::SaveLoad,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "Esc",
-        description: "Close context menu, exit terrain editing, cancel placement, or quit",
-        group: BindingGroup::General,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "1 / 2 / 3",
-        description: "Select survivor slot",
-        group: BindingGroup::General,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "Space",
-        description: "Center camera on selected survivor",
-        group: BindingGroup::General,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "R",
-        description: "Recruit nearest eligible survivor",
-        group: BindingGroup::General,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "Right click",
-        description: "Open the context menu for the clicked target (drag to orbit)",
-        group: BindingGroup::General,
-        terrain_relevant: false,
-    },
-    Binding {
-        key: "F10",
-        description: "Show or hide this panel",
-        group: BindingGroup::General,
-        terrain_relevant: false,
-    },
-];
 
 #[derive(Default)]
 pub(crate) struct Input {
@@ -326,87 +94,26 @@ impl App {
             return;
         };
         if down {
-            if let Some(command) = key_command(code, self.editor.active, event.repeat) {
-                self.apply_ui_action(command);
+            if let Some(command) = key_action(code, &self.action_context(), event.repeat) {
+                self.dispatch_action(command);
+                if self.quit_requested {
+                    event_loop.exit();
+                }
                 return;
             }
             if code == KeyCode::F10 {
                 return;
             }
         }
+        // Held-state camera input stays here; it is continuous, not a discrete action.
         match code {
-            KeyCode::Escape if down => self.handle_escape(event_loop),
             KeyCode::KeyA | KeyCode::ArrowLeft => self.input.left = down,
             KeyCode::KeyD | KeyCode::ArrowRight => self.input.right = down,
             KeyCode::KeyW | KeyCode::ArrowUp => self.input.forward = down,
             KeyCode::KeyS | KeyCode::ArrowDown => self.input.back = down,
             KeyCode::KeyQ if down => self.camera.orbit(-0.2, 0.0),
             KeyCode::KeyE if down => self.camera.orbit(0.2, 0.0),
-            KeyCode::Digit1 if down => self.select_player_slot(0),
-            KeyCode::Digit2 if down => self.select_player_slot(1),
-            KeyCode::Digit3 if down => self.select_player_slot(2),
-            KeyCode::Space if down => self.center_camera_on_selected(),
-            KeyCode::KeyR if down => self.recruit_nearest(),
             _ => {}
-        }
-    }
-
-    /// Escape peels back one layer: context menu, terrain editor, building placement, then quit.
-    fn handle_escape(&mut self, event_loop: &ActiveEventLoop) {
-        if self.ui.as_mut().is_some_and(|ui| ui.close_context_menu()) {
-            return;
-        }
-        if self.editor.active {
-            self.editor.active = false;
-            self.editor.slope_start = None;
-            self.build_status = None;
-        } else if self.build_mode.take().is_some() {
-            if let Some(ui) = &mut self.ui {
-                ui.set_selected_building(None);
-            }
-        } else {
-            event_loop.exit();
-        }
-    }
-
-    fn select_player_slot(&mut self, slot: usize) {
-        let player = self.world.player_characters().nth(slot);
-        if let Some(player) = player {
-            let _ = self.world.select_character(player);
-            self.selected_entities = vec![player];
-        }
-    }
-
-    fn center_camera_on_selected(&mut self) {
-        if let Some(selected) = self.world.selected_character() {
-            let p = self.world.position(selected);
-            self.camera.target = Vec3::new(
-                p.x,
-                self.world.terrain_edits().height(self.world.seed, p.x, p.z),
-                p.z,
-            );
-        }
-    }
-
-    fn recruit_nearest(&mut self) {
-        let Some(recruiter) = self.world.selected_character() else {
-            return;
-        };
-        let rp = self.world.position(recruiter);
-        let mut nearest: Option<(core_sim::Entity, f32)> = None;
-        for e in self.world.entities() {
-            if self.world.is_recruitable(e) {
-                let ep = self.world.position(e);
-                let dist_sq = (rp.x - ep.x).powi(2) + (rp.z - ep.z).powi(2);
-                if dist_sq <= core_sim::RECRUIT_MAX_DISTANCE.powi(2)
-                    && nearest.is_none_or(|(_, d)| dist_sq < d)
-                {
-                    nearest = Some((e, dist_sq));
-                }
-            }
-        }
-        if let Some((target, _)) = nearest {
-            let _ = self.world.recruit_with(recruiter, target);
         }
     }
 
@@ -674,67 +381,11 @@ fn drag_distance_sq(start: (f64, f64), end: (f64, f64)) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
     fn drag_distance_is_squared_euclidean() {
         assert_eq!(drag_distance_sq((0.0, 0.0), (3.0, 4.0)), 25.0);
         assert!(drag_distance_sq((10.0, 10.0), (12.0, 12.0)) < DRAG_THRESHOLD_SQ);
         assert!(drag_distance_sq((0.0, 0.0), (8.0, 0.0)) >= DRAG_THRESHOLD_SQ);
-    }
-
-    #[test]
-    fn terrain_keys_map_to_commands_only_while_editing() {
-        assert_eq!(
-            key_command(KeyCode::F1, true, false),
-            Some(UiAction::SetTerrainTool(TerrainTool::Raise))
-        );
-        assert_eq!(
-            key_command(KeyCode::F5, true, false),
-            Some(UiAction::SetTerrainTool(TerrainTool::Slope))
-        );
-        assert_eq!(
-            key_command(KeyCode::F5, false, false),
-            Some(UiAction::QuickSave)
-        );
-        assert_eq!(key_command(KeyCode::F1, false, false), None);
-        assert_eq!(key_command(KeyCode::BracketLeft, false, false), None);
-        assert_eq!(
-            key_command(KeyCode::Equal, true, false),
-            Some(UiAction::AdjustBrushStrength(250))
-        );
-        assert_eq!(
-            key_command(KeyCode::KeyT, false, false),
-            Some(UiAction::ToggleTerrainEditor)
-        );
-        assert_eq!(key_command(KeyCode::F10, false, true), None);
-        assert_eq!(key_command(KeyCode::KeyW, false, false), None);
-    }
-
-    #[test]
-    fn every_terrain_tool_key_is_listed_in_the_binding_table() {
-        // The table lists the range "F1–F4" plus "F5", so check the endpoints.
-        for key in ["F1", "F4", "F5"] {
-            assert!(TERRAIN_TOOL_KEYS.iter().any(|k| k.key == key));
-            assert!(BINDINGS.iter().any(|b| b.key.contains(key)));
-        }
-        for group in BindingGroup::ALL {
-            assert!(!group.title().is_empty());
-            assert!(BINDINGS.iter().any(|b| b.group == group));
-        }
-    }
-
-    #[test]
-    fn binding_table_has_unique_keys_and_nonempty_text() {
-        let mut keys = HashSet::new();
-        for binding in BINDINGS {
-            assert!(
-                keys.insert(binding.key),
-                "duplicate binding key: {}",
-                binding.key
-            );
-            assert!(!binding.key.trim().is_empty());
-            assert!(!binding.description.trim().is_empty());
-        }
     }
 }

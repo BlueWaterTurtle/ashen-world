@@ -1,4 +1,4 @@
-use crate::ui::UiAction;
+use crate::actions::Action;
 use core_sim::{
     Buildings, Entity, Job, JobStatus, Jobs, ResourceKind, WorkStatus, World, RECRUIT_MAX_DISTANCE,
 };
@@ -12,7 +12,7 @@ pub(crate) struct PanelCtx<'a> {
     pub building_defs: &'a [content::BuildingDef],
     pub build_status: Option<&'a str>,
     pub selected_building: &'a mut Option<String>,
-    pub actions: &'a mut Vec<UiAction>,
+    pub actions: &'a mut Vec<Action>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -80,9 +80,9 @@ fn squad_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
             if response.clicked() {
                 let multi = ui.input(|i| i.modifiers.command || i.modifiers.shift);
                 p.actions.push(if multi {
-                    UiAction::ToggleSelect(character)
+                    Action::ToggleSelect(character)
                 } else {
-                    UiAction::Select(character)
+                    Action::Select(character)
                 });
             }
         });
@@ -157,9 +157,12 @@ fn build_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
             .find(|definition| definition.id == active_id)
             .map_or(active_id, |definition| definition.name.as_str());
         ui.label(format!("Placing: {name}"));
-        if ui.button("Cancel placement").clicked() {
+        if ui
+            .button(Action::CancelBuilding.descriptor().label)
+            .clicked()
+        {
             *p.selected_building = None;
-            p.actions.push(UiAction::CancelBuilding);
+            p.actions.push(Action::CancelBuilding);
         }
         ui.small("Click terrain to place. Esc cancels.");
     } else {
@@ -194,7 +197,7 @@ fn build_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
             if response.clicked() {
                 *p.selected_building = Some(definition.id.clone());
                 p.actions
-                    .push(UiAction::SelectBuilding(definition.id.clone()));
+                    .push(Action::SelectBuilding(definition.id.clone()));
             }
             if selected {
                 ui.indent(("build_details", &definition.id), |ui| {
@@ -263,8 +266,11 @@ fn recruit_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
         for (entity, distance) in candidates.into_iter().take(8) {
             ui.horizontal(|ui| {
                 ui.label(format!("{}  {:.1} m", character_label(entity), distance));
-                if ui.small_button("Recruit").clicked() {
-                    p.actions.push(UiAction::Recruit(entity));
+                if ui
+                    .small_button(Action::Recruit(entity).descriptor().label)
+                    .clicked()
+                {
+                    p.actions.push(Action::Recruit(entity));
                 }
             });
         }
@@ -324,7 +330,7 @@ fn job_panel(
     jobs: &Jobs,
     buildings: &Buildings,
     defs: &[content::BuildingDef],
-    actions: &mut Vec<UiAction>,
+    actions: &mut Vec<Action>,
 ) {
     let list = jobs.jobs(worker);
     if list.is_empty() {
@@ -333,7 +339,7 @@ fn job_panel(
     if jobs.is_suspended(worker) {
         ui.small("Jobs suspended by a move order.");
         if ui.small_button("Resume jobs").clicked() {
-            actions.push(UiAction::ResumeJobs(worker));
+            actions.push(Action::ResumeJobs(worker));
         }
     }
     for (index, job) in list.iter().enumerate() {
@@ -357,13 +363,13 @@ fn job_panel(
                 ui.small(status_text(status));
             }
             if ui.small_button("▲").clicked() {
-                actions.push(UiAction::MoveJobUp { worker, index });
+                actions.push(Action::MoveJobUp { worker, index });
             }
             if ui.small_button("▼").clicked() {
-                actions.push(UiAction::MoveJobDown { worker, index });
+                actions.push(Action::MoveJobDown { worker, index });
             }
             if ui.small_button("✕").clicked() {
-                actions.push(UiAction::RemoveJob { worker, index });
+                actions.push(Action::RemoveJob { worker, index });
             }
         });
     }
@@ -382,7 +388,7 @@ fn job_panel(
                         .selectable_label(false, building_label(buildings, defs, i))
                         .clicked()
                     {
-                        actions.push(UiAction::AddJob {
+                        actions.push(Action::AddJob {
                             worker,
                             building: i,
                         });
@@ -411,7 +417,7 @@ fn job_panel(
                         building_label(buildings, defs, from)
                     );
                     if ui.selectable_label(false, label).clicked() {
-                        actions.push(UiAction::AddBuild { worker, site, from });
+                        actions.push(Action::AddBuild { worker, site, from });
                     }
                 }
             });
@@ -441,7 +447,7 @@ fn job_panel(
                         building_label(buildings, defs, to)
                     );
                     if ui.selectable_label(false, label).clicked() {
-                        actions.push(UiAction::AddHaul { worker, from, to });
+                        actions.push(Action::AddHaul { worker, from, to });
                     }
                 }
             });

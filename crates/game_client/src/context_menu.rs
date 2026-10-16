@@ -6,7 +6,7 @@
 
 use core_sim::{Buildings, Entity, Job, Jobs, ResourceKind};
 
-use crate::ui::UiAction;
+use crate::actions::Action;
 
 /// What the player right-clicked in the world.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -20,22 +20,29 @@ pub enum ContextTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextEntry {
     pub label: String,
-    pub action: Option<UiAction>,
+    pub action: Option<Action>,
     /// Hotkey shown next to the label when the action has a keyboard equivalent.
     pub hotkey: Option<&'static str>,
 }
 
-// Canonical labels for fixed context-menu rows; dynamic rows are built in `available_actions`.
-const LABEL_MOVE_HERE: &str = "Move here";
-const LABEL_INSPECT: &str = "Inspect";
+// Fixed rows take their labels from the action descriptors; dynamic rows are built in
+// `available_actions`. "Close" only dismisses the menu, so it has no action of its own.
 const LABEL_CLOSE: &str = "Close";
-const HOTKEY_CLOSE: &str = "Esc";
 
-fn entry(label: impl Into<String>, action: UiAction) -> ContextEntry {
+fn entry(label: impl Into<String>, action: Action) -> ContextEntry {
     ContextEntry {
         label: label.into(),
         action: Some(action),
         hotkey: None,
+    }
+}
+
+fn entry_for(action: Action) -> ContextEntry {
+    let descriptor = action.descriptor();
+    ContextEntry {
+        label: descriptor.label.to_string(),
+        action: Some(action),
+        hotkey: descriptor.hotkey,
     }
 }
 
@@ -93,7 +100,7 @@ pub fn available_actions(
                 };
                 entries.push(entry(
                     verb,
-                    UiAction::AddJob {
+                    Action::AddJob {
                         worker,
                         building: index,
                     },
@@ -112,7 +119,7 @@ pub fn available_actions(
                     {
                         entries.push(entry(
                             format!("Haul iron ore to {}", building_name(buildings, defs, to)),
-                            UiAction::AddHaul {
+                            Action::AddHaul {
                                 worker,
                                 from: index,
                                 to,
@@ -137,7 +144,7 @@ pub fn available_actions(
                                 "Haul iron ore from {}",
                                 building_name(buildings, defs, from)
                             ),
-                            UiAction::AddHaul {
+                            Action::AddHaul {
                                 worker,
                                 from,
                                 to: index,
@@ -153,7 +160,7 @@ pub fn available_actions(
                 {
                     entries.push(entry(
                         format!("Build {} site #{site}", s.def),
-                        UiAction::AddBuild {
+                        Action::AddBuild {
                             worker,
                             site,
                             from: index,
@@ -161,7 +168,7 @@ pub fn available_actions(
                     ));
                 }
             }
-            entries.push(entry(LABEL_INSPECT, UiAction::InspectBuilding(index)));
+            entries.push(entry_for(Action::InspectBuilding(index)));
         }
         ContextTarget::Site(site) => {
             if let Some(s) = buildings.sites.get(site).filter(|s| s.completed.is_none()) {
@@ -171,14 +178,14 @@ pub fn available_actions(
                     {
                         entries.push(entry(
                             format!("Build from {}", building_name(buildings, defs, from)),
-                            UiAction::AddBuild { worker, site, from },
+                            Action::AddBuild { worker, site, from },
                         ));
                     }
                 }
             }
         }
         ContextTarget::Ground { x, z } => {
-            entries.push(entry(LABEL_MOVE_HERE, UiAction::MoveSelected { x, z }));
+            entries.push(entry_for(Action::MoveSelected { x, z }));
         }
     }
     entries.push(close_entry());
@@ -189,7 +196,7 @@ fn close_entry() -> ContextEntry {
     ContextEntry {
         label: LABEL_CLOSE.to_string(),
         action: None,
-        hotkey: Some(HOTKEY_CLOSE),
+        hotkey: Action::Escape.descriptor().hotkey,
     }
 }
 
@@ -321,7 +328,7 @@ mod tests {
         assert_eq!(labels(&entries), ["Move here", "Close"]);
         assert_eq!(
             entries[0].action,
-            Some(UiAction::MoveSelected { x: 1.0, z: 2.0 })
+            Some(Action::MoveSelected { x: 1.0, z: 2.0 })
         );
     }
 }

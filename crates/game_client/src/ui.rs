@@ -1,3 +1,4 @@
+use crate::actions::{Action, ActionContext, ActionGroup};
 use crate::context_menu::ContextEntry;
 use crate::panel::{
     key_row, panel_frame, popover_frame, section_header, state_line, status_line, MovablePanel,
@@ -9,56 +10,6 @@ use glam::{Mat4, Vec3};
 use std::sync::Arc;
 use winit::event::WindowEvent;
 use winit::window::Window;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum UiAction {
-    Select(Entity),
-    /// Add or remove a survivor from the current selection (ctrl/shift-click).
-    ToggleSelect(Entity),
-    Recruit(Entity),
-    SelectBuilding(String),
-    CancelBuilding,
-    AddJob {
-        worker: Entity,
-        building: usize,
-    },
-    AddBuild {
-        worker: Entity,
-        site: usize,
-        from: usize,
-    },
-    AddHaul {
-        worker: Entity,
-        from: usize,
-        to: usize,
-    },
-    RemoveJob {
-        worker: Entity,
-        index: usize,
-    },
-    MoveJobUp {
-        worker: Entity,
-        index: usize,
-    },
-    MoveJobDown {
-        worker: Entity,
-        index: usize,
-    },
-    ResumeJobs(Entity),
-    /// Move the selected squad so its anchor stands at this ground point.
-    MoveSelected {
-        x: f32,
-        z: f32,
-    },
-    InspectBuilding(usize),
-    ToggleTerrainEditor,
-    SetTerrainTool(crate::terrain_editor::TerrainTool),
-    ToggleTerrainPanel,
-    QuickSave,
-    QuickLoad,
-    AdjustBrushRadius(i32),
-    AdjustBrushStrength(i32),
-}
 
 /// An open right-click menu: physical-pixel cursor position plus its entries.
 struct OpenContextMenu {
@@ -141,7 +92,7 @@ impl GameUi {
         self.state.on_window_event(window, event).consumed
     }
 
-    pub fn run(&mut self, window: &Window, data: HudData<'_>) -> Vec<UiAction> {
+    pub fn run(&mut self, window: &Window, data: HudData<'_>) -> Vec<Action> {
         let HudData {
             world,
             selected_entities,
@@ -386,7 +337,7 @@ fn terrain_tool_panel(
     visible: &mut bool,
     editor: &crate::terrain_editor::TerrainEditor,
     screen_height: f32,
-    actions: &mut Vec<UiAction>,
+    actions: &mut Vec<Action>,
 ) {
     MovablePanel::new("Terrain Tool", "terrain_tool_panel", Pos2::new(12.0, 12.0)).show(
         context,
@@ -398,27 +349,38 @@ fn terrain_tool_panel(
                 if editor.active { "On" } else { "Off" },
                 editor.active,
             );
+            let context = ActionContext {
+                editor_active: editor.active,
+            };
+            let toggle = Action::ToggleTerrainEditor.descriptor();
+            let hotkey = toggle.hotkey.unwrap_or_default();
             if ui
                 .button(if editor.active {
-                    "Stop editing (T)"
+                    format!("Stop editing ({hotkey})")
                 } else {
-                    "Start editing (T)"
+                    format!("Start editing ({hotkey})")
                 })
                 .clicked()
             {
-                actions.push(UiAction::ToggleTerrainEditor);
+                actions.push(Action::ToggleTerrainEditor);
             }
             ui.horizontal_wrapped(|ui| {
-                for key in crate::input::TERRAIN_TOOL_KEYS {
-                    let label = format!("{} ({})", terrain_tool_name(key.tool), key.key);
+                for tool in Action::TERRAIN_TOOLS {
+                    let action = Action::SetTerrainTool(tool);
+                    let descriptor = action.descriptor();
+                    let label = format!(
+                        "{} ({})",
+                        descriptor.label,
+                        descriptor.hotkey.unwrap_or_default()
+                    );
                     if ui
                         .add_enabled(
-                            editor.active,
-                            egui::SelectableLabel::new(editor.tool == key.tool, label),
+                            action.is_available(&context),
+                            egui::SelectableLabel::new(editor.tool == tool, label),
                         )
                         .clicked()
                     {
-                        actions.push(UiAction::SetTerrainTool(key.tool));
+                        actions.push(action);
                     }
                 }
             });
@@ -438,21 +400,20 @@ fn terrain_tool_panel(
             egui::ScrollArea::vertical()
                 .max_height((screen_height - 100.0).max(120.0))
                 .show(ui, |ui| {
-                    for group in crate::input::BindingGroup::ALL {
-                        let mut bindings = crate::input::BINDINGS
-                            .iter()
-                            .filter(|binding| binding.group == group)
-                            .peekable();
-                        if bindings.peek().is_none() {
+                    let rows = crate::key_bindings::rows();
+                    for group in ActionGroup::ALL {
+                        let mut group_rows =
+                            rows.iter().filter(|row| row.group == group).peekable();
+                        if group_rows.peek().is_none() {
                             continue;
                         }
                         section_header(ui, group.title());
-                        for binding in bindings {
+                        for row in group_rows {
                             key_row(
                                 ui,
-                                binding.key,
-                                binding.description,
-                                editor.active && binding.terrain_relevant,
+                                &row.key,
+                                row.description,
+                                editor.active && row.terrain_relevant,
                             );
                         }
                         ui.add_space(4.0);
@@ -460,16 +421,6 @@ fn terrain_tool_panel(
                 });
         },
     );
-}
-
-fn terrain_tool_name(tool: crate::terrain_editor::TerrainTool) -> &'static str {
-    match tool {
-        crate::terrain_editor::TerrainTool::Raise => "Raise",
-        crate::terrain_editor::TerrainTool::Lower => "Lower",
-        crate::terrain_editor::TerrainTool::Flatten => "Flatten",
-        crate::terrain_editor::TerrainTool::Smooth => "Smooth",
-        crate::terrain_editor::TerrainTool::Slope => "Slope",
-    }
 }
 
 /// Applies the shared HUD theme: spacing, typography, rounded widgets and

@@ -4,6 +4,7 @@ mod bootstrap;
 mod camera;
 mod context_menu;
 mod input;
+mod key_bindings;
 mod mesh;
 mod panel;
 mod picking;
@@ -61,6 +62,8 @@ struct App {
     ui: Option<GameUi>,
     agent_instances: Vec<AgentInstance>,
     save_metadata: SaveMetadata,
+    /// Set by `Action::Escape` when nothing is left to cancel; the event loop then exits.
+    quit_requested: bool,
 }
 
 impl App {
@@ -102,6 +105,7 @@ impl App {
             ui: None,
             agent_instances: Vec::new(),
             save_metadata,
+            quit_requested: false,
         }
     }
 
@@ -189,7 +193,7 @@ impl App {
             _ => Vec::new(),
         };
         for action in actions {
-            self.apply_ui_action(action);
+            self.dispatch_action(action);
         }
     }
 
