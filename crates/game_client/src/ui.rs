@@ -1,4 +1,4 @@
-use crate::actions::{Action, ActionContext, ActionGroup};
+use crate::actions::{Action, ActionContext, ActionGroup, PlacementPreview};
 use crate::context_menu::ContextEntry;
 use crate::panel::{
     key_row, panel_frame, popover_frame, section_header, state_line, status_line, MovablePanel,
@@ -31,6 +31,7 @@ pub struct HudData<'a> {
     pub camera: &'a crate::camera::Camera,
     pub selection_rect: Option<[f32; 4]>,
     pub terrain_editor: &'a crate::terrain_editor::TerrainEditor,
+    pub placement_preview: Option<&'a PlacementPreview>,
 }
 
 pub struct GameUi {
@@ -104,6 +105,7 @@ impl GameUi {
             camera,
             selection_rect,
             terrain_editor,
+            placement_preview,
         } = data;
         let input = self.state.take_egui_input(window);
         let mut actions = Vec::new();
@@ -204,6 +206,45 @@ impl GameUi {
                 }
             }
 
+            if let Some(preview) = placement_preview {
+                let fp = preview.footprint;
+                let corners = [
+                    (fp.x, fp.z),
+                    (fp.x + fp.width, fp.z),
+                    (fp.x + fp.width, fp.z + fp.depth),
+                    (fp.x, fp.z + fp.depth),
+                ];
+                let points: Option<Vec<Pos2>> = corners
+                    .into_iter()
+                    .map(|(x, z)| {
+                        let position = Vec3::new(
+                            x as f32,
+                            world.terrain_edits().height(seed, x as f32, z as f32) + 0.4,
+                            z as f32,
+                        );
+                        project_to_screen(view_proj, position, screen_width, screen_height)
+                    })
+                    .collect();
+                if let Some(points) = points {
+                    let (fill, stroke) = if preview.reason.is_some() {
+                        (
+                            Color32::from_rgba_unmultiplied(210, 55, 50, 70),
+                            Color32::from_rgb(245, 90, 80),
+                        )
+                    } else {
+                        (
+                            Color32::from_rgba_unmultiplied(55, 200, 105, 70),
+                            Color32::from_rgb(95, 245, 145),
+                        )
+                    };
+                    painter.add(egui::Shape::convex_polygon(
+                        points,
+                        fill,
+                        Stroke::new(2.0_f32, stroke),
+                    ));
+                }
+            }
+
             egui::SidePanel::right("game_hud")
                 .frame(panel_frame())
                 .default_width(270.0)
@@ -221,6 +262,7 @@ impl GameUi {
                             build_status,
                             selected_building: &mut *selected_building,
                             actions: &mut actions,
+                            placement_preview,
                         },
                     );
                 });
