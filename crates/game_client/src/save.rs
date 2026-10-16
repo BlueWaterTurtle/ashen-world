@@ -686,4 +686,46 @@ mod tests {
         assert_eq!(buildings2.buildings, buildings.buildings);
         assert!(jobs2.jobs(Entity(0)).is_empty());
     }
+
+    #[test]
+    fn in_flight_auto_delivery_survives_save_load() {
+        let (mut world, mut buildings, _, store, site) = construction_state();
+        world.set_player_controlled(Entity(0), true);
+        let mut jobs = Jobs::default();
+        world.set_position(
+            Entity(0),
+            buildings.buildings[store].worker_slot_position(0),
+        );
+        world.tick = core_sim::JOB_CHECK_INTERVAL_TICKS;
+        jobs.update(&mut world, &mut buildings);
+        assert_eq!(jobs.auto_build_site(Entity(0)), Some(site));
+        let en_route = jobs.site_delivery_en_route(site);
+        assert!(en_route > 0);
+
+        let (mut world2, mut buildings2, mut jobs2) = reload(&world, &buildings, &jobs);
+        assert_eq!(jobs2.auto_build_site(Entity(0)), Some(site));
+        assert_eq!(jobs2.site_delivery_en_route(site), en_route);
+
+        for _ in 0..40 {
+            for (w, b, j) in [
+                (&mut world, &mut buildings, &mut jobs),
+                (&mut world2, &mut buildings2, &mut jobs2),
+            ] {
+                let carrying = w.inventory(Entity(0)).unwrap().count_of("wood") > 0;
+                let at = if carrying || b.site_needs(site) == 0 {
+                    b.sites[site].worker_position()
+                } else {
+                    b.buildings[store].worker_slot_position(0)
+                };
+                w.set_position(Entity(0), at);
+                w.tick = core_sim::JOB_CHECK_INTERVAL_TICKS
+                    * (w.tick / core_sim::JOB_CHECK_INTERVAL_TICKS + 1);
+                j.update(w, b);
+                b.tick_production(2.0);
+            }
+        }
+        assert!(buildings.sites[site].completed.is_some());
+        assert_eq!(buildings2.sites, buildings.sites);
+        assert_eq!(buildings2.buildings, buildings.buildings);
+    }
 }
