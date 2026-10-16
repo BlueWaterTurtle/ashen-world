@@ -110,7 +110,7 @@ pub(crate) struct Binding {
     pub(crate) terrain_relevant: bool,
 }
 
-// Keep this display table alongside handle_key and handle_mouse_button when bindings change.
+// Display table only: keep it in sync with `key_command`, `handle_key` and `handle_mouse_button`.
 pub(crate) const BINDINGS: &[Binding] = &[
     Binding {
         key: "T",
@@ -125,8 +125,8 @@ pub(crate) const BINDINGS: &[Binding] = &[
         terrain_relevant: true,
     },
     Binding {
-        key: "F5",
-        description: "Slope tool while editing; quick-save otherwise",
+        key: "F5 (editing)",
+        description: "Select slope tool (quick-save is F5 when not editing)",
         group: BindingGroup::Terrain,
         terrain_relevant: true,
     },
@@ -143,10 +143,17 @@ pub(crate) const BINDINGS: &[Binding] = &[
         terrain_relevant: true,
     },
     Binding {
-        key: "Left mouse",
-        description: "Apply terrain tool; otherwise select, move, place a building, or drag-select",
-        group: BindingGroup::Build,
+        key: "Left mouse (editing)",
+        description: "Apply the selected terrain tool at the cursor",
+        group: BindingGroup::Terrain,
         terrain_relevant: true,
+    },
+    Binding {
+        key: "Left mouse",
+        description:
+            "Place the selected building when placing; otherwise select, move, or drag-select",
+        group: BindingGroup::Build,
+        terrain_relevant: false,
     },
     Binding {
         key: "A / ←",
@@ -191,6 +198,12 @@ pub(crate) const BINDINGS: &[Binding] = &[
         terrain_relevant: false,
     },
     Binding {
+        key: "F5 (not editing)",
+        description: "Quick-save (selects the slope tool while terrain editing)",
+        group: BindingGroup::SaveLoad,
+        terrain_relevant: false,
+    },
+    Binding {
         key: "F9",
         description: "Quick-load",
         group: BindingGroup::SaveLoad,
@@ -222,7 +235,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
     },
     Binding {
         key: "Right click",
-        description: "Open selected worker's context menu; drag to orbit",
+        description: "Open the context menu for the clicked target (drag to orbit)",
         group: BindingGroup::General,
         terrain_relevant: false,
     },
