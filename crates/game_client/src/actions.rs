@@ -76,6 +76,32 @@ impl App {
             UiAction::ResumeJobs(worker) => self.jobs.resume(worker),
             UiAction::MoveSelected { x, z } => self.move_selected_to(x, z),
             UiAction::InspectBuilding(index) => self.inspect_building(index),
+            UiAction::ToggleTerrainEditor => self.toggle_terrain_editor(),
+            UiAction::SetTerrainTool(tool) => {
+                if self.editor.active {
+                    self.editor.set_tool(tool);
+                    self.build_status = Some(self.editor.status());
+                }
+            }
+            UiAction::ToggleTerrainPanel => {
+                if let Some(ui) = &mut self.ui {
+                    ui.toggle_terrain_panel();
+                }
+            }
+            UiAction::QuickSave => self.quick_save(),
+            UiAction::QuickLoad => self.quick_load(),
+            UiAction::AdjustBrushRadius(step) => {
+                if self.editor.active {
+                    self.editor.adjust_radius(step);
+                    self.build_status = Some(self.editor.status());
+                }
+            }
+            UiAction::AdjustBrushStrength(step_mm) => {
+                if self.editor.active {
+                    self.editor.adjust_strength(step_mm);
+                    self.build_status = Some(self.editor.status());
+                }
+            }
             UiAction::CancelBuilding => {
                 self.build_mode = None;
                 self.build_status = None;
@@ -83,6 +109,20 @@ impl App {
                     ui.set_selected_building(None);
                 }
             }
+        }
+    }
+
+    fn toggle_terrain_editor(&mut self) {
+        self.editor.active = !self.editor.active;
+        self.editor.slope_start = None;
+        if self.editor.active {
+            self.build_mode = None;
+            if let Some(ui) = &mut self.ui {
+                ui.set_selected_building(None);
+            }
+            self.build_status = Some(self.editor.status());
+        } else {
+            self.build_status = None;
         }
     }
 

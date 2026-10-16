@@ -91,10 +91,7 @@ fn squad_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
 
 /// Short activity text and colour for a squad row, from the worker's top job.
 fn activity(jobs: &Jobs, buildings: &Buildings, worker: Entity) -> (&'static str, egui::Color32) {
-    const IDLE: egui::Color32 = egui::Color32::from_rgb(140, 144, 152);
-    const GOOD: egui::Color32 = egui::Color32::from_rgb(112, 224, 174);
-    const WARN: egui::Color32 = egui::Color32::from_rgb(225, 190, 120);
-    const BAD: egui::Color32 = egui::Color32::from_rgb(224, 112, 112);
+    use crate::panel::{BAD, GOOD, IDLE, WARN};
     if jobs.is_suspended(worker) {
         return ("ordered", WARN);
     }

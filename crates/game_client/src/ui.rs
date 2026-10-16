@@ -1,4 +1,8 @@
 use crate::context_menu::ContextEntry;
+use crate::panel::{
+    key_row, panel_frame, popover_frame, section_header, state_line, status_line, MovablePanel,
+    ACCENT, DIVIDER, PANEL_FILL,
+};
 use core_sim::{fertility_at, resource_richness_at, Buildings, Entity, Jobs, World};
 use egui::{ClippedPrimitive, Color32, Id, LayerId, Order, Pos2, Stroke, TexturesDelta};
 use glam::{Mat4, Vec3};
@@ -47,6 +51,13 @@ pub enum UiAction {
         z: f32,
     },
     InspectBuilding(usize),
+    ToggleTerrainEditor,
+    SetTerrainTool(crate::terrain_editor::TerrainTool),
+    ToggleTerrainPanel,
+    QuickSave,
+    QuickLoad,
+    AdjustBrushRadius(i32),
+    AdjustBrushStrength(i32),
 }
 
 /// An open right-click menu: physical-pixel cursor position plus its entries.
@@ -263,7 +274,13 @@ impl GameUi {
                     );
                 });
 
-            terrain_tool_panel(ctx, terrain_panel_visible, terrain_editor, screen_height);
+            terrain_tool_panel(
+                ctx,
+                terrain_panel_visible,
+                terrain_editor,
+                screen_height,
+                &mut actions,
+            );
 
             if let Some(menu) = context_menu.as_mut() {
                 let mut close = false;
@@ -274,10 +291,14 @@ impl GameUi {
                     .show(ctx, |ui| {
                         popover_frame().show(ui, |ui| {
                             ui.set_min_width(170.0);
-                            ui.label(egui::RichText::new(&menu.title).strong().color(ACCENT));
+                            section_header(ui, &menu.title);
                             ui.separator();
                             for entry in &menu.entries {
-                                if ui.selectable_label(false, &entry.label).clicked() {
+                                let text = match entry.hotkey {
+                                    Some(key) => format!("{}  [{key}]", entry.label),
+                                    None => entry.label.clone(),
+                                };
+                                if ui.selectable_label(false, text).clicked() {
                                     if let Some(action) = &entry.action {
                                         actions.push(action.clone());
                                     }
@@ -365,73 +386,80 @@ fn terrain_tool_panel(
     visible: &mut bool,
     editor: &crate::terrain_editor::TerrainEditor,
     screen_height: f32,
+    actions: &mut Vec<UiAction>,
 ) {
-    egui::Window::new("Terrain Tool")
-        .id(Id::new("terrain_tool_panel"))
-        .default_pos(Pos2::new(12.0, 12.0))
-        .default_width(290.0)
-        .resizable(true)
-        .constrain(true)
-        .frame(panel_frame())
-        .open(visible)
-        .show(context, |ui| {
-            ui.label(format!(
-                "Terrain editing: {}",
-                if editor.active { "On" } else { "Off" }
-            ));
-            ui.label(format!("Tool: {}", terrain_tool_name(editor.tool)));
-            ui.small(format!(
-                "Brush: {} m · Strength: {:.1} m",
-                editor.radius,
-                editor.strength_mm as f32 / 1000.0
-            ));
+    MovablePanel::new("Terrain Tool", "terrain_tool_panel", Pos2::new(12.0, 12.0)).show(
+        context,
+        visible,
+        |ui| {
+            state_line(
+                ui,
+                "Terrain editing:",
+                if editor.active { "On" } else { "Off" },
+                editor.active,
+            );
+            if ui
+                .button(if editor.active {
+                    "Stop editing (T)"
+                } else {
+                    "Start editing (T)"
+                })
+                .clicked()
+            {
+                actions.push(UiAction::ToggleTerrainEditor);
+            }
+            ui.horizontal_wrapped(|ui| {
+                for key in crate::input::TERRAIN_TOOL_KEYS {
+                    let label = format!("{} ({})", terrain_tool_name(key.tool), key.key);
+                    if ui
+                        .add_enabled(
+                            editor.active,
+                            egui::SelectableLabel::new(editor.tool == key.tool, label),
+                        )
+                        .clicked()
+                    {
+                        actions.push(UiAction::SetTerrainTool(key.tool));
+                    }
+                }
+            });
+            status_line(
+                ui,
+                format!(
+                    "Brush: {} m · Strength: {:.1} m",
+                    editor.radius,
+                    editor.strength_mm as f32 / 1000.0
+                ),
+            );
             if editor.slope_start.is_some() {
-                ui.small("Slope start set; click the end point.");
+                status_line(ui, "Slope start set; click the end point.");
             }
             ui.separator();
 
             egui::ScrollArea::vertical()
                 .max_height((screen_height - 100.0).max(120.0))
                 .show(ui, |ui| {
-                    for group in [
-                        crate::input::BindingGroup::Terrain,
-                        crate::input::BindingGroup::Camera,
-                        crate::input::BindingGroup::Build,
-                        crate::input::BindingGroup::SaveLoad,
-                        crate::input::BindingGroup::General,
-                    ] {
-                        let title = match group {
-                            crate::input::BindingGroup::Terrain => "Terrain",
-                            crate::input::BindingGroup::Camera => "Camera",
-                            crate::input::BindingGroup::Build => "Build",
-                            crate::input::BindingGroup::SaveLoad => "Save / Load",
-                            crate::input::BindingGroup::General => "General",
-                        };
-                        let bindings: Vec<_> = crate::input::BINDINGS
+                    for group in crate::input::BindingGroup::ALL {
+                        let mut bindings = crate::input::BINDINGS
                             .iter()
                             .filter(|binding| binding.group == group)
-                            .collect();
-                        if bindings.is_empty() {
+                            .peekable();
+                        if bindings.peek().is_none() {
                             continue;
                         }
-
-                        ui.label(egui::RichText::new(title).strong().color(ACCENT));
+                        section_header(ui, group.title());
                         for binding in bindings {
-                            ui.horizontal(|ui| {
-                                let key = egui::RichText::new(binding.key).strong();
-                                let key = if editor.active && binding.terrain_relevant {
-                                    key.color(ACCENT)
-                                } else {
-                                    key
-                                };
-                                ui.label(key);
-                                ui.label(binding.description);
-                            });
+                            key_row(
+                                ui,
+                                binding.key,
+                                binding.description,
+                                editor.active && binding.terrain_relevant,
+                            );
                         }
                         ui.add_space(4.0);
                     }
                 });
-        });
+        },
+    );
 }
 
 fn terrain_tool_name(tool: crate::terrain_editor::TerrainTool) -> &'static str {
@@ -442,39 +470,6 @@ fn terrain_tool_name(tool: crate::terrain_editor::TerrainTool) -> &'static str {
         crate::terrain_editor::TerrainTool::Smooth => "Smooth",
         crate::terrain_editor::TerrainTool::Slope => "Slope",
     }
-}
-
-const PANEL_FILL: Color32 = Color32::from_rgba_premultiplied(22, 24, 28, 235);
-const ACCENT: Color32 = Color32::from_rgb(225, 190, 120);
-const DIVIDER: Color32 = Color32::from_rgb(62, 66, 74);
-
-/// Dark, framed panel style with an amber accent line on the inner edge.
-fn panel_frame() -> egui::Frame {
-    egui::Frame::none()
-        .fill(PANEL_FILL)
-        .stroke(Stroke::new(1.0_f32, ACCENT))
-        .inner_margin(egui::Margin::same(12.0))
-        .shadow(egui::epaint::Shadow {
-            offset: egui::vec2(-2.0, 0.0),
-            blur: 12.0,
-            spread: 0.0,
-            color: Color32::from_black_alpha(120),
-        })
-}
-
-/// Small rounded popover used by the right-click context menu.
-fn popover_frame() -> egui::Frame {
-    egui::Frame::none()
-        .fill(PANEL_FILL)
-        .stroke(Stroke::new(1.0_f32, ACCENT))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::same(8.0))
-        .shadow(egui::epaint::Shadow {
-            offset: egui::vec2(2.0, 3.0),
-            blur: 10.0,
-            spread: 0.0,
-            color: Color32::from_black_alpha(120),
-        })
 }
 
 /// Applies the shared HUD theme: spacing, typography, rounded widgets and
