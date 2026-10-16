@@ -1,5 +1,8 @@
 //! Maps a right-clicked world target plus the selected worker to the actions the
 //! context menu offers. Pure data: the UI renders entries and `main` executes the actions.
+//!
+//! Availability here is a UX hint only: the simulation (`Jobs`, `Buildings`) remains the
+//! authority and re-validates every job when it runs.
 
 use core_sim::{Buildings, Entity, Job, Jobs, ResourceKind};
 
@@ -18,12 +21,21 @@ pub enum ContextTarget {
 pub struct ContextEntry {
     pub label: String,
     pub action: Option<UiAction>,
+    /// Hotkey shown next to the label when the action has a keyboard equivalent.
+    pub hotkey: Option<&'static str>,
 }
+
+// Canonical labels for fixed context-menu rows; dynamic rows are built in `available_actions`.
+const LABEL_MOVE_HERE: &str = "Move here";
+const LABEL_INSPECT: &str = "Inspect";
+const LABEL_CLOSE: &str = "Close";
+const HOTKEY_CLOSE: &str = "Esc";
 
 fn entry(label: impl Into<String>, action: UiAction) -> ContextEntry {
     ContextEntry {
         label: label.into(),
         action: Some(action),
+        hotkey: None,
     }
 }
 
@@ -149,7 +161,7 @@ pub fn available_actions(
                     ));
                 }
             }
-            entries.push(entry("Inspect", UiAction::InspectBuilding(index)));
+            entries.push(entry(LABEL_INSPECT, UiAction::InspectBuilding(index)));
         }
         ContextTarget::Site(site) => {
             if let Some(s) = buildings.sites.get(site).filter(|s| s.completed.is_none()) {
@@ -166,7 +178,7 @@ pub fn available_actions(
             }
         }
         ContextTarget::Ground { x, z } => {
-            entries.push(entry("Move here", UiAction::MoveSelected { x, z }));
+            entries.push(entry(LABEL_MOVE_HERE, UiAction::MoveSelected { x, z }));
         }
     }
     entries.push(close_entry());
@@ -175,8 +187,9 @@ pub fn available_actions(
 
 fn close_entry() -> ContextEntry {
     ContextEntry {
-        label: "Close".to_string(),
+        label: LABEL_CLOSE.to_string(),
         action: None,
+        hotkey: Some(HOTKEY_CLOSE),
     }
 }
 
@@ -263,6 +276,37 @@ mod tests {
         jobs.add_job(worker, Job::Work { building: 0 });
         let mine = available_actions(ContextTarget::Building(0), worker, &jobs, &buildings, &[]);
         assert!(!labels(&mine).contains(&"Mine"));
+    }
+
+    #[test]
+    fn entries_have_labels_and_no_duplicate_actions() {
+        let mut buildings = Buildings::default();
+        buildings
+            .buildings
+            .push(building("iron_mine", 1, true, true, false));
+        buildings
+            .buildings
+            .push(building("ore_storage", 0, false, true, true));
+        for target in [
+            ContextTarget::Building(0),
+            ContextTarget::Building(1),
+            ContextTarget::Building(9),
+            ContextTarget::Site(0),
+            ContextTarget::Ground { x: 0.0, z: 0.0 },
+        ] {
+            let entries = available_actions(target, Entity(0), &Jobs::default(), &buildings, &[]);
+            assert_eq!(entries.last().unwrap().action, None);
+            assert_eq!(entries.last().unwrap().hotkey, Some("Esc"));
+            for (i, e) in entries.iter().enumerate() {
+                assert!(!e.label.trim().is_empty());
+                assert!(entries[..i].iter().all(|o| o.label != e.label));
+                if let Some(action) = &e.action {
+                    assert!(entries[..i]
+                        .iter()
+                        .all(|o| o.action.as_ref() != Some(action)));
+                }
+            }
+        }
     }
 
     #[test]

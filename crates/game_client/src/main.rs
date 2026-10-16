@@ -5,6 +5,7 @@ mod camera;
 mod context_menu;
 mod input;
 mod mesh;
+mod panel;
 mod picking;
 mod renderer;
 mod save;

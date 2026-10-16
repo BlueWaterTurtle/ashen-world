@@ -10,6 +10,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use crate::context_menu::{self, ContextTarget};
 use crate::picking::select_players_in_rect;
 use crate::terrain_editor::TerrainTool;
+use crate::ui::UiAction;
 use crate::App;
 
 /// Squared cursor travel (in pixels) above which a left press becomes a drag selection
@@ -23,6 +24,83 @@ pub(crate) enum BindingGroup {
     Build,
     SaveLoad,
     General,
+}
+
+impl BindingGroup {
+    /// Display order in the key list.
+    pub(crate) const ALL: [BindingGroup; 5] = [
+        BindingGroup::Terrain,
+        BindingGroup::Camera,
+        BindingGroup::Build,
+        BindingGroup::SaveLoad,
+        BindingGroup::General,
+    ];
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            BindingGroup::Terrain => "Terrain",
+            BindingGroup::Camera => "Camera",
+            BindingGroup::Build => "Build",
+            BindingGroup::SaveLoad => "Save / Load",
+            BindingGroup::General => "General",
+        }
+    }
+}
+
+/// Terrain tool hotkeys: the canonical source for both key handling and the panel buttons.
+pub(crate) struct TerrainToolKey {
+    pub(crate) code: KeyCode,
+    pub(crate) key: &'static str,
+    pub(crate) tool: TerrainTool,
+}
+
+pub(crate) const TERRAIN_TOOL_KEYS: [TerrainToolKey; 5] = [
+    TerrainToolKey {
+        code: KeyCode::F1,
+        key: "F1",
+        tool: TerrainTool::Raise,
+    },
+    TerrainToolKey {
+        code: KeyCode::F2,
+        key: "F2",
+        tool: TerrainTool::Lower,
+    },
+    TerrainToolKey {
+        code: KeyCode::F3,
+        key: "F3",
+        tool: TerrainTool::Flatten,
+    },
+    TerrainToolKey {
+        code: KeyCode::F4,
+        key: "F4",
+        tool: TerrainTool::Smooth,
+    },
+    TerrainToolKey {
+        code: KeyCode::F5,
+        key: "F5",
+        tool: TerrainTool::Slope,
+    },
+];
+
+/// Parses a key press into a shared command, or `None` if the key is handled elsewhere
+/// (camera movement, Escape, slot selection). Execution lives in `App::apply_ui_action`.
+pub(crate) fn key_command(code: KeyCode, editor_active: bool, repeat: bool) -> Option<UiAction> {
+    if editor_active {
+        if let Some(key) = TERRAIN_TOOL_KEYS.iter().find(|key| key.code == code) {
+            return Some(UiAction::SetTerrainTool(key.tool));
+        }
+    }
+    match code {
+        KeyCode::KeyT => Some(UiAction::ToggleTerrainEditor),
+        KeyCode::F5 => Some(UiAction::QuickSave),
+        KeyCode::F9 => Some(UiAction::QuickLoad),
+        KeyCode::F10 if !repeat => Some(UiAction::ToggleTerrainPanel),
+        KeyCode::BracketLeft if editor_active => Some(UiAction::AdjustBrushRadius(-1)),
+        KeyCode::BracketRight if editor_active => Some(UiAction::AdjustBrushRadius(1)),
+        KeyCode::Minus if editor_active => Some(UiAction::AdjustBrushStrength(-250)),
+        KeyCode::Equal if editor_active => Some(UiAction::AdjustBrushStrength(250)),
+        _ => None,
+    }
 }
 
 pub(crate) struct Binding {
@@ -234,50 +312,17 @@ impl App {
         let PhysicalKey::Code(code) = event.physical_key else {
             return;
         };
+        if down {
+            if let Some(command) = key_command(code, self.editor.active, event.repeat) {
+                self.apply_ui_action(command);
+                return;
+            }
+            if code == KeyCode::F10 {
+                return;
+            }
+        }
         match code {
             KeyCode::Escape if down => self.handle_escape(event_loop),
-            KeyCode::KeyT if down => {
-                self.editor.active = !self.editor.active;
-                self.editor.slope_start = None;
-                if self.editor.active {
-                    self.build_mode = None;
-                    if let Some(ui) = &mut self.ui {
-                        ui.set_selected_building(None);
-                    }
-                    self.build_status = Some(self.editor.status());
-                } else {
-                    self.build_status = None;
-                }
-            }
-            KeyCode::F1 | KeyCode::F2 | KeyCode::F3 | KeyCode::F4 | KeyCode::F5
-                if down && self.editor.active =>
-            {
-                self.editor.set_tool(match code {
-                    KeyCode::F1 => TerrainTool::Raise,
-                    KeyCode::F2 => TerrainTool::Lower,
-                    KeyCode::F3 => TerrainTool::Flatten,
-                    KeyCode::F4 => TerrainTool::Smooth,
-                    _ => TerrainTool::Slope,
-                });
-                self.build_status = Some(self.editor.status());
-            }
-            KeyCode::F5 if down => self.quick_save(),
-            KeyCode::F9 if down => self.quick_load(),
-            KeyCode::F10 if down && !event.repeat => {
-                if let Some(ui) = &mut self.ui {
-                    ui.toggle_terrain_panel();
-                }
-            }
-            KeyCode::BracketLeft | KeyCode::BracketRight if down && self.editor.active => {
-                let step = if code == KeyCode::BracketLeft { -1 } else { 1 };
-                self.editor.adjust_radius(step);
-                self.build_status = Some(self.editor.status());
-            }
-            KeyCode::Minus | KeyCode::Equal if down && self.editor.active => {
-                let step = if code == KeyCode::Minus { -250 } else { 250 };
-                self.editor.adjust_strength(step);
-                self.build_status = Some(self.editor.status());
-            }
             KeyCode::KeyA | KeyCode::ArrowLeft => self.input.left = down,
             KeyCode::KeyD | KeyCode::ArrowRight => self.input.right = down,
             KeyCode::KeyW | KeyCode::ArrowUp => self.input.forward = down,
@@ -623,6 +668,47 @@ mod tests {
         assert_eq!(drag_distance_sq((0.0, 0.0), (3.0, 4.0)), 25.0);
         assert!(drag_distance_sq((10.0, 10.0), (12.0, 12.0)) < DRAG_THRESHOLD_SQ);
         assert!(drag_distance_sq((0.0, 0.0), (8.0, 0.0)) >= DRAG_THRESHOLD_SQ);
+    }
+
+    #[test]
+    fn terrain_keys_map_to_commands_only_while_editing() {
+        assert_eq!(
+            key_command(KeyCode::F1, true, false),
+            Some(UiAction::SetTerrainTool(TerrainTool::Raise))
+        );
+        assert_eq!(
+            key_command(KeyCode::F5, true, false),
+            Some(UiAction::SetTerrainTool(TerrainTool::Slope))
+        );
+        assert_eq!(
+            key_command(KeyCode::F5, false, false),
+            Some(UiAction::QuickSave)
+        );
+        assert_eq!(key_command(KeyCode::F1, false, false), None);
+        assert_eq!(key_command(KeyCode::BracketLeft, false, false), None);
+        assert_eq!(
+            key_command(KeyCode::Equal, true, false),
+            Some(UiAction::AdjustBrushStrength(250))
+        );
+        assert_eq!(
+            key_command(KeyCode::KeyT, false, false),
+            Some(UiAction::ToggleTerrainEditor)
+        );
+        assert_eq!(key_command(KeyCode::F10, false, true), None);
+        assert_eq!(key_command(KeyCode::KeyW, false, false), None);
+    }
+
+    #[test]
+    fn every_terrain_tool_key_is_listed_in_the_binding_table() {
+        // The table lists the range "F1–F4" plus "F5", so check the endpoints.
+        for key in ["F1", "F4", "F5"] {
+            assert!(TERRAIN_TOOL_KEYS.iter().any(|k| k.key == key));
+            assert!(BINDINGS.iter().any(|b| b.key.contains(key)));
+        }
+        for group in BindingGroup::ALL {
+            assert!(!group.title().is_empty());
+            assert!(BINDINGS.iter().any(|b| b.group == group));
+        }
     }
 
     #[test]
