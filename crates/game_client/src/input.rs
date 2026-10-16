@@ -16,6 +16,146 @@ use crate::App;
 /// and a right press stops counting as a context-menu click.
 const DRAG_THRESHOLD_SQ: f64 = 64.0;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindingGroup {
+    Terrain,
+    Camera,
+    Build,
+    SaveLoad,
+    General,
+}
+
+pub(crate) struct Binding {
+    pub(crate) key: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) group: BindingGroup,
+    pub(crate) terrain_relevant: bool,
+}
+
+// Keep this display table alongside handle_key and handle_mouse_button when bindings change.
+pub(crate) const BINDINGS: &[Binding] = &[
+    Binding {
+        key: "T",
+        description: "Toggle terrain editing",
+        group: BindingGroup::Terrain,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "F1–F4",
+        description: "Raise, lower, flatten, or smooth terrain while editing",
+        group: BindingGroup::Terrain,
+        terrain_relevant: true,
+    },
+    Binding {
+        key: "F5",
+        description: "Slope tool while editing; quick-save otherwise",
+        group: BindingGroup::Terrain,
+        terrain_relevant: true,
+    },
+    Binding {
+        key: "[ / ]",
+        description: "Decrease / increase brush radius while editing",
+        group: BindingGroup::Terrain,
+        terrain_relevant: true,
+    },
+    Binding {
+        key: "- / =",
+        description: "Decrease / increase brush strength while editing",
+        group: BindingGroup::Terrain,
+        terrain_relevant: true,
+    },
+    Binding {
+        key: "Left mouse",
+        description: "Apply terrain tool; otherwise select, move, or place a building",
+        group: BindingGroup::Terrain,
+        terrain_relevant: true,
+    },
+    Binding {
+        key: "A / ←",
+        description: "Pan camera left",
+        group: BindingGroup::Camera,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "D / →",
+        description: "Pan camera right",
+        group: BindingGroup::Camera,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "W / ↑",
+        description: "Pan camera forward",
+        group: BindingGroup::Camera,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "S / ↓",
+        description: "Pan camera back",
+        group: BindingGroup::Camera,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "Q / E",
+        description: "Orbit camera left / right",
+        group: BindingGroup::Camera,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "Right / middle mouse drag",
+        description: "Orbit camera",
+        group: BindingGroup::Camera,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "Mouse wheel",
+        description: "Zoom camera",
+        group: BindingGroup::Camera,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "F9",
+        description: "Quick-load",
+        group: BindingGroup::SaveLoad,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "Esc",
+        description: "Close context menu, exit terrain editing, cancel placement, or quit",
+        group: BindingGroup::General,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "1 / 2 / 3",
+        description: "Select survivor slot",
+        group: BindingGroup::General,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "Space",
+        description: "Center camera on selected survivor",
+        group: BindingGroup::General,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "R",
+        description: "Recruit nearest eligible survivor",
+        group: BindingGroup::General,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "Right click",
+        description: "Open selected worker's context menu; drag to orbit",
+        group: BindingGroup::General,
+        terrain_relevant: false,
+    },
+    Binding {
+        key: "F10",
+        description: "Show or hide this panel",
+        group: BindingGroup::General,
+        terrain_relevant: false,
+    },
+];
+
 #[derive(Default)]
 pub(crate) struct Input {
     pub(crate) left: bool,
@@ -123,6 +263,11 @@ impl App {
             }
             KeyCode::F5 if down => self.quick_save(),
             KeyCode::F9 if down => self.quick_load(),
+            KeyCode::F10 if down && !event.repeat => {
+                if let Some(ui) = &mut self.ui {
+                    ui.toggle_terrain_panel();
+                }
+            }
             KeyCode::BracketLeft | KeyCode::BracketRight if down && self.editor.active => {
                 let step = if code == KeyCode::BracketLeft { -1 } else { 1 };
                 self.editor.adjust_radius(step);
@@ -471,11 +616,22 @@ fn drag_distance_sq(start: (f64, f64), end: (f64, f64)) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn drag_distance_is_squared_euclidean() {
         assert_eq!(drag_distance_sq((0.0, 0.0), (3.0, 4.0)), 25.0);
         assert!(drag_distance_sq((10.0, 10.0), (12.0, 12.0)) < DRAG_THRESHOLD_SQ);
         assert!(drag_distance_sq((0.0, 0.0), (8.0, 0.0)) >= DRAG_THRESHOLD_SQ);
+    }
+
+    #[test]
+    fn binding_table_has_unique_keys_and_nonempty_text() {
+        let mut keys = HashSet::new();
+        for binding in BINDINGS {
+            assert!(keys.insert(binding.key), "duplicate binding key: {}", binding.key);
+            assert!(!binding.key.trim().is_empty());
+            assert!(!binding.description.trim().is_empty());
+        }
     }
 }
