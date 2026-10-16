@@ -68,6 +68,7 @@ pub struct HudData<'a> {
     pub seed: u64,
     pub camera: &'a crate::camera::Camera,
     pub selection_rect: Option<[f32; 4]>,
+    pub terrain_editor: &'a crate::terrain_editor::TerrainEditor,
 }
 
 pub struct GameUi {
@@ -78,6 +79,7 @@ pub struct GameUi {
     textures_delta: TexturesDelta,
     selected_building: Option<String>,
     context_menu: Option<OpenContextMenu>,
+    terrain_panel_visible: bool,
 }
 
 impl GameUi {
@@ -101,6 +103,7 @@ impl GameUi {
             textures_delta: TexturesDelta::default(),
             selected_building: None,
             context_menu: None,
+            terrain_panel_visible: true,
         }
     }
 
@@ -138,11 +141,13 @@ impl GameUi {
             seed,
             camera,
             selection_rect,
+            terrain_editor,
         } = data;
         let input = self.state.take_egui_input(window);
         let mut actions = Vec::new();
         let selected_building = &mut self.selected_building;
         let context_menu = &mut self.context_menu;
+        let terrain_panel_visible = &mut self.terrain_panel_visible;
         let output = self.context.run(input, |ctx| {
             let size = window.inner_size();
             let scale = window.scale_factor() as f32;
@@ -258,6 +263,8 @@ impl GameUi {
                     );
                 });
 
+            terrain_tool_panel(ctx, terrain_panel_visible, terrain_editor, screen_height);
+
             if let Some(menu) = context_menu.as_mut() {
                 let mut close = false;
                 let response = egui::Area::new(Id::new("context_menu"))
@@ -304,6 +311,10 @@ impl GameUi {
         self.selected_building = id;
     }
 
+    pub fn toggle_terrain_panel(&mut self) {
+        self.terrain_panel_visible = !self.terrain_panel_visible;
+    }
+
     pub fn paint(
         &mut self,
         device: &wgpu::Device,
@@ -346,6 +357,90 @@ impl GameUi {
         }
         self.textures_delta = TexturesDelta::default();
         command_buffers
+    }
+}
+
+fn terrain_tool_panel(
+    context: &egui::Context,
+    visible: &mut bool,
+    editor: &crate::terrain_editor::TerrainEditor,
+    screen_height: f32,
+) {
+    egui::Window::new("Terrain Tool")
+        .id(Id::new("terrain_tool_panel"))
+        .default_pos(Pos2::new(12.0, 12.0))
+        .default_width(290.0)
+        .resizable(true)
+        .constrain(true)
+        .frame(panel_frame())
+        .open(visible)
+        .show(context, |ui| {
+            ui.label(format!(
+                "Terrain editing: {}",
+                if editor.active { "On" } else { "Off" }
+            ));
+            ui.label(format!("Tool: {}", terrain_tool_name(editor.tool)));
+            ui.small(format!(
+                "Brush: {} m · Strength: {:.1} m",
+                editor.radius,
+                editor.strength_mm as f32 / 1000.0
+            ));
+            if editor.slope_start.is_some() {
+                ui.small("Slope start set; click the end point.");
+            }
+            ui.separator();
+
+            egui::ScrollArea::vertical()
+                .max_height((screen_height - 100.0).max(120.0))
+                .show(ui, |ui| {
+                    for group in [
+                        crate::input::BindingGroup::Terrain,
+                        crate::input::BindingGroup::Camera,
+                        crate::input::BindingGroup::Build,
+                        crate::input::BindingGroup::SaveLoad,
+                        crate::input::BindingGroup::General,
+                    ] {
+                        let title = match group {
+                            crate::input::BindingGroup::Terrain => "Terrain",
+                            crate::input::BindingGroup::Camera => "Camera",
+                            crate::input::BindingGroup::Build => "Build",
+                            crate::input::BindingGroup::SaveLoad => "Save / Load",
+                            crate::input::BindingGroup::General => "General",
+                        };
+                        let bindings: Vec<_> = crate::input::BINDINGS
+                            .iter()
+                            .filter(|binding| binding.group == group)
+                            .collect();
+                        if bindings.is_empty() {
+                            continue;
+                        }
+
+                        ui.label(egui::RichText::new(title).strong().color(ACCENT));
+                        for binding in bindings {
+                            ui.horizontal(|ui| {
+                                let key = egui::RichText::new(binding.key).strong();
+                                let key = if editor.active && binding.terrain_relevant {
+                                    key.color(ACCENT)
+                                } else {
+                                    key
+                                };
+                                ui.label(key);
+                                ui.label(binding.description);
+                            });
+                        }
+                        ui.add_space(4.0);
+                    }
+                });
+        });
+}
+
+fn terrain_tool_name(tool: crate::terrain_editor::TerrainTool) -> &'static str {
+    match tool {
+        crate::terrain_editor::TerrainTool::Raise => "Raise",
+        crate::terrain_editor::TerrainTool::Lower => "Lower",
+        crate::terrain_editor::TerrainTool::Flatten => "Flatten",
+        crate::terrain_editor::TerrainTool::Smooth => "Smooth",
+        crate::terrain_editor::TerrainTool::Slope => "Slope",
     }
 }
 

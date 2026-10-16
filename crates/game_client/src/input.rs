@@ -66,8 +66,8 @@ pub(crate) const BINDINGS: &[Binding] = &[
     },
     Binding {
         key: "Left mouse",
-        description: "Apply terrain tool; otherwise select, move, or place a building",
-        group: BindingGroup::Terrain,
+        description: "Apply terrain tool; otherwise select, move, place a building, or drag-select",
+        group: BindingGroup::Build,
         terrain_relevant: true,
     },
     Binding {
@@ -629,7 +629,11 @@ mod tests {
     fn binding_table_has_unique_keys_and_nonempty_text() {
         let mut keys = HashSet::new();
         for binding in BINDINGS {
-            assert!(keys.insert(binding.key), "duplicate binding key: {}", binding.key);
+            assert!(
+                keys.insert(binding.key),
+                "duplicate binding key: {}",
+                binding.key
+            );
             assert!(!binding.key.trim().is_empty());
             assert!(!binding.description.trim().is_empty());
         }
