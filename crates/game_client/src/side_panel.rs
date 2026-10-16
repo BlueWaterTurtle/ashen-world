@@ -466,7 +466,9 @@ fn job_panel(
             "done".to_string()
         } else {
             let remaining = site.required.saturating_sub(site.delivered);
-            let activity = if remaining > 0 {
+            let activity = if remaining > 0 && jobs.site_delivery_en_route(i) > 0 {
+                "delivery en route"
+            } else if remaining > 0 {
                 "waiting for supply"
             } else if site.worked {
                 "building"
