@@ -144,6 +144,11 @@ impl App {
             KeyCode::Digit3 if down => self.select_player_slot(2),
             KeyCode::Space if down => self.center_camera_on_selected(),
             KeyCode::KeyR if down => self.recruit_nearest(),
+            KeyCode::KeyH if down => {
+                if let Some(ui) = &mut self.ui {
+                    ui.toggle_keys_panel();
+                }
+            }
             _ => {}
         }
     }

@@ -4,6 +4,7 @@ mod bootstrap;
 mod camera;
 mod context_menu;
 mod input;
+mod key_bindings;
 mod mesh;
 mod picking;
 mod renderer;
@@ -182,6 +183,8 @@ impl App {
                     seed: self.world.seed,
                     camera: &self.camera,
                     selection_rect: self.input.selection_rect,
+                    editor: &self.editor,
+                    placing: self.build_mode.is_some(),
                 },
             ),
             _ => Vec::new(),

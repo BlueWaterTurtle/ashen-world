@@ -68,6 +68,8 @@ pub struct HudData<'a> {
     pub seed: u64,
     pub camera: &'a crate::camera::Camera,
     pub selection_rect: Option<[f32; 4]>,
+    pub editor: &'a crate::terrain_editor::TerrainEditor,
+    pub placing: bool,
 }
 
 pub struct GameUi {
@@ -78,6 +80,7 @@ pub struct GameUi {
     textures_delta: TexturesDelta,
     selected_building: Option<String>,
     context_menu: Option<OpenContextMenu>,
+    keys_panel_visible: bool,
 }
 
 impl GameUi {
@@ -101,6 +104,7 @@ impl GameUi {
             textures_delta: TexturesDelta::default(),
             selected_building: None,
             context_menu: None,
+            keys_panel_visible: true,
         }
     }
 
@@ -116,6 +120,10 @@ impl GameUi {
             entries,
             fresh: true,
         });
+    }
+
+    pub fn toggle_keys_panel(&mut self) {
+        self.keys_panel_visible = !self.keys_panel_visible;
     }
 
     /// Closes the context menu; returns whether one was open.
@@ -138,11 +146,14 @@ impl GameUi {
             seed,
             camera,
             selection_rect,
+            editor,
+            placing,
         } = data;
         let input = self.state.take_egui_input(window);
         let mut actions = Vec::new();
         let selected_building = &mut self.selected_building;
         let context_menu = &mut self.context_menu;
+        let keys_panel_visible = &mut self.keys_panel_visible;
         let output = self.context.run(input, |ctx| {
             let size = window.inner_size();
             let scale = window.scale_factor() as f32;
@@ -258,6 +269,20 @@ impl GameUi {
                     );
                 });
 
+            if *keys_panel_visible {
+                let mut open = true;
+                egui::Window::new("Terrain Tool & Keys")
+                    .id(Id::new("terrain_keys_panel"))
+                    .frame(panel_frame())
+                    .default_pos(Pos2::new(12.0, 12.0))
+                    .constrain(true)
+                    .collapsible(true)
+                    .resizable(false)
+                    .open(&mut open)
+                    .show(ctx, |ui| keys_panel(ui, editor, placing));
+                *keys_panel_visible = open;
+            }
+
             if let Some(menu) = context_menu.as_mut() {
                 let mut close = false;
                 let response = egui::Area::new(Id::new("context_menu"))
@@ -354,6 +379,47 @@ const ACCENT: Color32 = Color32::from_rgb(225, 190, 120);
 const DIVIDER: Color32 = Color32::from_rgb(62, 66, 74);
 
 /// Dark, framed panel style with an amber accent line on the inner edge.
+fn keys_panel(ui: &mut egui::Ui, editor: &crate::terrain_editor::TerrainEditor, placing: bool) {
+    use crate::key_bindings::{BindingGroup, BINDINGS};
+    if editor.active {
+        ui.label(
+            egui::RichText::new("Terrain editor: ON")
+                .strong()
+                .color(ACCENT),
+        );
+        ui.label(editor.status());
+    } else {
+        ui.label("Terrain editor: off (press T)");
+    }
+    for group in BindingGroup::ALL {
+        ui.separator();
+        ui.label(egui::RichText::new(group.title()).strong());
+        egui::Grid::new(("key_group", group.title()))
+            .num_columns(2)
+            .show(ui, |ui| {
+                for binding in BINDINGS.iter().filter(|b| b.group == group) {
+                    let relevant = match group {
+                        BindingGroup::Terrain => editor.active,
+                        BindingGroup::Build => placing,
+                        _ => false,
+                    };
+                    let (key, text) = (
+                        egui::RichText::new(binding.key).monospace(),
+                        egui::RichText::new(binding.description),
+                    );
+                    if relevant {
+                        ui.label(key.strong().color(ACCENT));
+                        ui.label(text.color(ACCENT));
+                    } else {
+                        ui.label(key);
+                        ui.label(text);
+                    }
+                    ui.end_row();
+                }
+            });
+    }
+}
+
 fn panel_frame() -> egui::Frame {
     egui::Frame::none()
         .fill(PANEL_FILL)
