@@ -21,6 +21,10 @@ pub enum Action {
     Recruit(core_sim::Entity),
     SelectBuilding(String),
     CancelBuilding,
+    ConfirmBuilding {
+        x: f32,
+        z: f32,
+    },
     AddJob {
         worker: core_sim::Entity,
         building: usize,
@@ -388,6 +392,8 @@ static SELECT_BUILDING: ActionDescriptor =
     unkeyed("Place building", G::Build, "Choose a building to place");
 static CANCEL_BUILDING: ActionDescriptor =
     unkeyed("Cancel placement", G::Build, "Cancel building placement");
+static CONFIRM_BUILDING: ActionDescriptor =
+    unkeyed("Place building", G::Build, "Confirm building placement");
 static ADD_JOB: ActionDescriptor = unkeyed("Work", G::General, "Queue a work job");
 static ADD_BUILD: ActionDescriptor = unkeyed("Build", G::Build, "Queue a construction job");
 static ADD_HAUL: ActionDescriptor = unkeyed("Haul", G::General, "Queue a haul job");
@@ -431,6 +437,7 @@ pub(crate) static DESCRIPTORS: &[&ActionDescriptor] = &[
     &RECRUIT,
     &SELECT_BUILDING,
     &CANCEL_BUILDING,
+    &CONFIRM_BUILDING,
     &ADD_JOB,
     &ADD_BUILD,
     &ADD_HAUL,
@@ -460,6 +467,7 @@ impl Action {
             Action::Recruit(_) => &RECRUIT,
             Action::SelectBuilding(_) => &SELECT_BUILDING,
             Action::CancelBuilding => &CANCEL_BUILDING,
+            Action::ConfirmBuilding { .. } => &CONFIRM_BUILDING,
             Action::AddJob { .. } => &ADD_JOB,
             Action::AddBuild { .. } => &ADD_BUILD,
             Action::AddHaul { .. } => &ADD_HAUL,
@@ -565,6 +573,7 @@ impl App {
                     ui.set_selected_building(Some(id));
                 }
             }
+            Action::ConfirmBuilding { x, z } => self.confirm_building_at(x, z),
             Action::AddJob { worker, building } => {
                 self.jobs.add_job(worker, Job::Work { building });
             }
@@ -635,10 +644,8 @@ impl App {
             self.editor.active = false;
             self.editor.slope_start = None;
             self.build_status = None;
-        } else if self.build_mode.take().is_some() {
-            if let Some(ui) = &mut self.ui {
-                ui.set_selected_building(None);
-            }
+        } else if self.build_mode.is_some() {
+            self.dispatch_action(Action::CancelBuilding);
         } else {
             self.quit_requested = true;
         }
@@ -792,10 +799,101 @@ impl App {
                 }
             }
             Err(error) => {
-                self.build_status = Some(format!("Can't build here: {error:?}."));
+                self.build_status = Some(format!("Can't build here: {error}."));
             }
         }
     }
+
+    pub(crate) fn placement_preview(&self) -> Option<PlacementPreview> {
+        let (screen_x, screen_y) = self.input.last_cursor?;
+        let window = self.window.as_ref()?;
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        let ground = self.camera.ground_intersection(
+            screen_x as f32,
+            screen_y as f32,
+            size.width as f32,
+            size.height as f32,
+            self.camera.target.y,
+        )?;
+        self.placement_preview_at(ground.x, ground.z)
+    }
+
+    pub(crate) fn placement_preview_at(&self, x: f32, z: f32) -> Option<PlacementPreview> {
+        let definition = self
+            .building_defs
+            .iter()
+            .find(|definition| self.build_mode.as_deref() == Some(&definition.id))?;
+        let (footprint, rules, _) = building_placement(definition, x, z);
+        let reason = self
+            .buildings
+            .validate(
+                self.world.seed,
+                self.world.terrain_edits(),
+                footprint,
+                &rules,
+            )
+            .err()
+            .map(|error| error.to_string());
+        Some(PlacementPreview { footprint, reason })
+    }
+
+    fn confirm_building_at(&mut self, x: f32, z: f32) {
+        let Some(definition) = self
+            .build_mode
+            .as_deref()
+            .and_then(|id| {
+                self.building_defs
+                    .iter()
+                    .find(|definition| definition.id == id)
+            })
+            .cloned()
+        else {
+            return;
+        };
+        let (footprint, rules, logistics) = building_placement(&definition, x, z);
+        self.place_building(&definition, footprint, &rules, logistics);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlacementPreview {
+    pub(crate) footprint: Footprint,
+    pub(crate) reason: Option<String>,
+}
+
+fn building_placement(
+    definition: &content::BuildingDef,
+    x: f32,
+    z: f32,
+) -> (Footprint, PlacementRules, BuildingLogistics) {
+    let footprint = Footprint {
+        x: x.floor() as i32 - definition.width / 2,
+        z: z.floor() as i32 - definition.depth / 2,
+        width: definition.width,
+        depth: definition.depth,
+    };
+    let rules = PlacementRules {
+        requires_resource: definition.requires_resource.clone(),
+        minimum_resource_richness: definition.min_resource_richness,
+        minimum_fertility: definition.min_fertility,
+        building_margin: 0,
+    };
+    let logistics = BuildingLogistics {
+        worker_slots: definition.worker_slots,
+        input_slots: definition.input_slots,
+        output_slots: definition.output_slots,
+        stack_limit: definition.stack_limit,
+        input_resources: definition.input_resources.clone(),
+        output_resources: definition.output_resources.clone(),
+        is_storage: definition.storage,
+        is_mine: definition.mine,
+        is_smelter: definition.smelter,
+        required_inputs: definition.required_inputs.clone(),
+    };
+    (footprint, rules, logistics)
 }
 
 /// The material and amount a building costs, or `None` if it is free.
@@ -810,7 +908,11 @@ pub(super) fn construction_cost(definition: &content::BuildingDef) -> Option<(Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_sim::{Entity, ResourceKind};
+    use core_sim::{
+        Building, Buildings, Entity, Jobs, ResourceKind, Schedule, SlotInventory, World,
+        WorldConfig,
+    };
+    use std::collections::BTreeMap;
 
     const EDITING: ActionContext = ActionContext {
         editor_active: true,
@@ -818,6 +920,85 @@ mod tests {
     const IDLE: ActionContext = ActionContext {
         editor_active: false,
     };
+
+    fn test_app() -> App {
+        let world = World::generate(&WorldConfig {
+            agent_count: 1,
+            ..Default::default()
+        });
+        let mut source = Building {
+            def: "ore_store".into(),
+            footprint: Footprint {
+                x: 0,
+                z: 0,
+                width: 2,
+                depth: 2,
+            },
+            planted_tick: None,
+            workers: Vec::new(),
+            inputs: SlotInventory::default(),
+            outputs: SlotInventory::new(1, 20, vec!["iron_ore".into()]),
+            is_storage: true,
+            mine: None,
+            smelt: None,
+            required_inputs: Vec::new(),
+            worked: false,
+        };
+        source.outputs.insert_resource("iron_ore", 10);
+        let definition = content::BuildingDef {
+            id: "house".into(),
+            name: "House".into(),
+            width: 2,
+            depth: 2,
+            requires_resource: None,
+            min_resource_richness: None,
+            min_fertility: None,
+            worker_slots: 0,
+            input_slots: 0,
+            output_slots: 0,
+            stack_limit: 100,
+            input_resources: Vec::new(),
+            required_inputs: Vec::new(),
+            output_resources: Vec::new(),
+            storage: false,
+            mine: false,
+            smelter: false,
+            dwelling: true,
+            cost: BTreeMap::from([("iron_ore".into(), 1.0)]),
+            crop: None,
+        };
+        let metadata = crate::save::SaveMetadata {
+            scenario_selector: "default".into(),
+            scenario_name: "Default".into(),
+            manifest_source: "manifest.ron".into(),
+            content_domains: Vec::new(),
+            systems: Vec::new(),
+            mods: Vec::new(),
+            timestamp_unix_seconds: 0,
+        };
+        App::new(
+            world,
+            vec![definition],
+            Schedule::new(),
+            Buildings {
+                buildings: vec![source],
+                ..Default::default()
+            },
+            Jobs::default(),
+            metadata,
+        )
+    }
+
+    fn valid_site_position(app: &App) -> (f32, f32) {
+        (-20..20)
+            .flat_map(|x| (-20..20).map(move |z| (x, z)))
+            .map(|(x, z)| (x as f32 + 1.1, z as f32 + 1.1))
+            .find(|&(x, z)| {
+                app.placement_preview_at(x, z)
+                    .is_some_and(|preview| preview.reason.is_none())
+            })
+            .expect("find a valid placement near the material source")
+    }
 
     /// One instance of every variant; the exhaustive match below fails to compile when a
     /// variant is added without being listed here.
@@ -829,6 +1010,7 @@ mod tests {
             Action::Recruit(e),
             Action::SelectBuilding("x".into()),
             Action::CancelBuilding,
+            Action::ConfirmBuilding { x: 1.0, z: 2.0 },
             Action::AddJob {
                 worker: e,
                 building: 0,
@@ -877,6 +1059,7 @@ mod tests {
                 | Action::Recruit(_)
                 | Action::SelectBuilding(_)
                 | Action::CancelBuilding
+                | Action::ConfirmBuilding { .. }
                 | Action::AddJob { .. }
                 | Action::AddBuild { .. }
                 | Action::AddHaul { .. }
@@ -911,6 +1094,50 @@ mod tests {
                 "{action:?} descriptor missing from DESCRIPTORS"
             );
         }
+    }
+
+    #[test]
+    fn placement_preview_uses_sim_validation_and_reports_overlap() {
+        let mut app = test_app();
+        app.dispatch_action(Action::SelectBuilding("house".into()));
+        let (x, z) = valid_site_position(&app);
+        let preview = app.placement_preview_at(x, z).unwrap();
+        let sim_result = app.buildings.validate(
+            app.world.seed,
+            app.world.terrain_edits(),
+            preview.footprint,
+            &PlacementRules::default(),
+        );
+        assert_eq!(
+            preview.reason,
+            sim_result.err().map(|error| error.to_string())
+        );
+        assert_eq!(preview.reason, None);
+
+        app.buildings.buildings.push(Building {
+            footprint: preview.footprint,
+            ..app.buildings.buildings[0].clone()
+        });
+        let blocked = app.placement_preview_at(x, z).unwrap();
+        assert_eq!(
+            blocked.reason.as_deref(),
+            Some("overlaps another building or construction site")
+        );
+    }
+
+    #[test]
+    fn confirm_building_action_creates_a_site_and_construction_job() {
+        let mut app = test_app();
+        let worker = app.world.selected_character().unwrap();
+        app.dispatch_action(Action::SelectBuilding("house".into()));
+        let (x, z) = valid_site_position(&app);
+        app.dispatch_action(Action::ConfirmBuilding { x, z });
+
+        assert_eq!(app.buildings.sites.len(), 1);
+        assert_eq!(app.buildings.sites[0].def, "house");
+        assert_eq!(app.buildings.sites[0].progress, 0.0);
+        app.jobs.update(&mut app.world, &mut app.buildings);
+        assert_eq!(app.jobs.auto_build_site(worker), Some(0));
     }
 
     #[test]

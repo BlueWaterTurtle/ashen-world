@@ -337,6 +337,7 @@ mod tests {
         assert_eq!(loaded.world, expected.world);
         assert_eq!(loaded.format_version, FORMAT_VERSION);
         assert_eq!(loaded.buildings.buildings.len(), 1);
+        assert!(loaded.buildings.sites.is_empty());
         assert_eq!(loaded.buildings.buildings[0].inputs.count_of("wood"), 4);
         assert_eq!(
             loaded.buildings.buildings[0]
@@ -413,6 +414,7 @@ mod tests {
         let loaded = read_save(path).unwrap();
         assert_eq!(loaded.format_version, FORMAT_VERSION);
         assert_eq!(loaded.buildings.buildings.len(), 1);
+        assert!(loaded.buildings.sites.is_empty());
         assert_eq!(loaded.buildings.buildings[0].inputs.count_of("wood"), 4);
         assert_eq!(loaded.jobs.jobs(Entity(0)), &[Job::Work { building: 0 }]);
     }
@@ -634,16 +636,21 @@ mod tests {
     #[test]
     fn in_progress_construction_survives_save_load_and_finishes_identically() {
         let (mut world, mut buildings, mut jobs, store, site) = construction_state();
-        for _ in 0..3 {
+        for _ in 0..4 {
             construction_step(&mut world, &mut buildings, &mut jobs, store, site);
         }
         assert!(buildings.sites[site].delivered > 0);
         assert!(buildings.sites[site].completed.is_none());
         assert_eq!(buildings.sites[site].builder, Some(Entity(0)));
+        assert!(buildings.sites[site].progress > 0.0);
 
         let (mut world2, mut buildings2, mut jobs2) = reload(&world, &buildings, &jobs);
         assert_eq!(buildings2.sites, buildings.sites);
         assert_eq!(buildings2.buildings, buildings.buildings);
+        assert_eq!(
+            buildings2.sites[site].progress,
+            buildings.sites[site].progress
+        );
         assert_eq!(jobs2.jobs(Entity(0)), jobs.jobs(Entity(0)));
 
         for _ in 0..12 {

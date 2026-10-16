@@ -186,6 +186,12 @@ pub fn available_actions(
         }
         ContextTarget::Ground { x, z } => {
             entries.push(entry_for(Action::MoveSelected { x, z }));
+            for definition in defs {
+                entries.push(entry(
+                    format!("Place {}", definition.name),
+                    Action::SelectBuilding(definition.id.clone()),
+                ));
+            }
         }
     }
     entries.push(close_entry());
@@ -330,5 +336,42 @@ mod tests {
             entries[0].action,
             Some(Action::MoveSelected { x: 1.0, z: 2.0 })
         );
+    }
+
+    #[test]
+    fn ground_building_entry_uses_select_building_action() {
+        let definition = content::BuildingDef {
+            id: "house".into(),
+            name: "House".into(),
+            width: 2,
+            depth: 2,
+            requires_resource: None,
+            min_resource_richness: None,
+            min_fertility: None,
+            worker_slots: 0,
+            input_slots: 0,
+            output_slots: 0,
+            stack_limit: 100,
+            input_resources: Vec::new(),
+            required_inputs: Vec::new(),
+            output_resources: Vec::new(),
+            storage: false,
+            mine: false,
+            smelter: false,
+            dwelling: true,
+            cost: Default::default(),
+            crop: None,
+        };
+        let entries = available_actions(
+            ContextTarget::Ground { x: 1.0, z: 2.0 },
+            Entity(0),
+            &Jobs::default(),
+            &Buildings::default(),
+            &[definition],
+        );
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Place House"
+                && entry.action == Some(Action::SelectBuilding("house".into()))
+        }));
     }
 }

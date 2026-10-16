@@ -1,7 +1,6 @@
 //! Keyboard and mouse handling: turns window events into camera, selection, build and
 //! terrain-editing changes on `App`.
 
-use core_sim::{BuildingLogistics, Footprint, PlacementRules};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -243,39 +242,16 @@ impl App {
         }
 
         if let Some(definition_id) = self.build_mode.clone() {
-            let Some(definition) = self
+            if self
                 .building_defs
                 .iter()
-                .find(|definition| definition.id == definition_id)
-                .cloned()
-            else {
-                return;
-            };
-            let footprint = Footprint {
-                x: ground.x.floor() as i32 - definition.width / 2,
-                z: ground.z.floor() as i32 - definition.depth / 2,
-                width: definition.width,
-                depth: definition.depth,
-            };
-            let rules = PlacementRules {
-                requires_resource: definition.requires_resource.clone(),
-                minimum_resource_richness: definition.min_resource_richness,
-                minimum_fertility: definition.min_fertility,
-                building_margin: 0,
-            };
-            let logistics = BuildingLogistics {
-                worker_slots: definition.worker_slots,
-                input_slots: definition.input_slots,
-                output_slots: definition.output_slots,
-                stack_limit: definition.stack_limit,
-                input_resources: definition.input_resources.clone(),
-                output_resources: definition.output_resources.clone(),
-                is_storage: definition.storage,
-                is_mine: definition.mine,
-                is_smelter: definition.smelter,
-                required_inputs: definition.required_inputs.clone(),
-            };
-            self.place_building(&definition, footprint, &rules, logistics);
+                .any(|definition| definition.id == definition_id)
+            {
+                self.dispatch_action(crate::actions::Action::ConfirmBuilding {
+                    x: ground.x,
+                    z: ground.z,
+                });
+            }
             return;
         }
 

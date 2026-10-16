@@ -1,4 +1,5 @@
-use crate::actions::Action;
+use crate::actions::{Action, PlacementPreview};
+use crate::panel::{BAD, GOOD};
 use core_sim::{
     Buildings, Entity, Job, JobStatus, Jobs, ResourceKind, WorkStatus, World, RECRUIT_MAX_DISTANCE,
 };
@@ -13,6 +14,7 @@ pub(crate) struct PanelCtx<'a> {
     pub build_status: Option<&'a str>,
     pub selected_building: &'a mut Option<String>,
     pub actions: &'a mut Vec<Action>,
+    pub placement_preview: Option<&'a PlacementPreview>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,6 +37,13 @@ pub(crate) fn show(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
     ui.label(format!("{} survivors", p.world.player_character_count()));
     ui.separator();
     selected_summary(ui, p);
+    if let Some(preview) = p.placement_preview {
+        if let Some(reason) = &preview.reason {
+            ui.colored_label(BAD, format!("Invalid placement: {reason}."));
+        } else {
+            ui.colored_label(GOOD, "Valid placement");
+        }
+    }
     ui.separator();
 
     let tab_id = egui::Id::new("side_panel_tab");
