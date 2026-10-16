@@ -99,6 +99,7 @@ fn activity(jobs: &Jobs, buildings: &Buildings, worker: Entity) -> (&'static str
         return ("ordered", WARN);
     }
     match jobs.job_status(worker, 0, buildings) {
+        None if jobs.auto_build_site(worker).is_some() => ("building", GOOD),
         None => ("idle", IDLE),
         Some(JobStatus::Working) => ("working", GOOD),
         Some(JobStatus::Moving) => ("moving", WARN),
@@ -171,7 +172,7 @@ fn build_section(ui: &mut egui::Ui, p: &mut PanelCtx<'_>) {
         ui.small(status);
     }
 
-    ui.small("Costs are not charged in this prototype.");
+    ui.small("Costed buildings become sites; idle survivors fetch the materials and build them.");
 
     let categories = ["Mines", "Farms", "Housing", "Industry", "Storage"];
     for category in categories {
@@ -452,12 +453,21 @@ fn job_panel(
         let state = if site.completed.is_some() {
             "done".to_string()
         } else {
+            let waiting = site.delivered < site.required
+                && buildings
+                    .find_material_source(i, core_sim::BUILD_SOURCE_RADIUS)
+                    .is_none();
             format!(
-                "{}/{} {}, {:.0}% built",
+                "{}/{} {}, {:.0}% built{}",
                 site.delivered,
                 site.required,
                 site.material.id(),
-                100.0 * site.progress / core_sim::BUILD_SECONDS
+                100.0 * site.progress / core_sim::BUILD_SECONDS,
+                if waiting {
+                    format!(" (waiting for {} in stock nearby)", site.material.id())
+                } else {
+                    String::new()
+                }
             )
         };
         ui.small(format!("Site #{i} {}: {state}", site.def));

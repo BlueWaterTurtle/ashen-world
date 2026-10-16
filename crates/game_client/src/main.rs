@@ -48,8 +48,6 @@ struct App {
     building_defs: Vec<content::BuildingDef>,
     schedule: Schedule,
     build_mode: Option<String>,
-    /// Debug: placing a selected building requests construction instead of placing it instantly.
-    construct_mode: bool,
     build_status: Option<String>,
     editor: TerrainEditor,
     camera: Camera,
@@ -87,7 +85,6 @@ impl App {
             building_defs,
             schedule,
             build_mode: None,
-            construct_mode: false,
             build_status: None,
             editor: TerrainEditor::default(),
             camera,

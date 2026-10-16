@@ -6,7 +6,7 @@
         depth: 4,
         dwelling: true,
         cost: {
-            "wood": 20.0,
+            "iron_ore": 1.0,
         },
     ),
     (
@@ -27,7 +27,7 @@
         ],
         crop: Some("wheat"),
         cost: {
-            "wood": 10.0,
+            "iron_ore": 1.0,
         },
     ),
     (
@@ -48,9 +48,6 @@
             "iron_ore",
         ],
         mine: true,
-        cost: {
-            "wood": 30.0,
-        },
     ),
     (
         id: "workshop",
@@ -73,8 +70,7 @@
         ],
         smelter: true,
         cost: {
-            "wood": 40.0,
-            "iron": 10.0,
+            "iron_ore": 1.0,
         },
     ),
     (
@@ -94,7 +90,7 @@
         ],
         storage: true,
         cost: {
-            "wood": 15.0,
+            "iron_ore": 1.0,
         },
     ),
     (
@@ -114,7 +110,7 @@
         ],
         storage: true,
         cost: {
-            "wood": 15.0,
+            "iron_ore": 1.0,
         },
     ),
     (
@@ -134,7 +130,7 @@
         ],
         storage: true,
         cost: {
-            "wood": 15.0,
+            "iron_ore": 1.0,
         },
     ),
 ]

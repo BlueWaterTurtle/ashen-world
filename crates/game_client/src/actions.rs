@@ -128,50 +128,52 @@ impl App {
         }
     }
 
-    /// Debug construction request: reserve a site for `definition`, keep a wood store stocked
-    /// for it (wood is not produced anywhere yet), and put the selected worker on the build job.
-    pub(super) fn request_construction(
+    /// Place `definition`: free buildings appear at once, costed ones become
+    /// construction sites that idle survivors supply and finish.
+    pub(super) fn place_building(
         &mut self,
         definition: &content::BuildingDef,
         footprint: Footprint,
         rules: &PlacementRules,
         logistics: BuildingLogistics,
     ) {
-        let wood = ResourceKind::Wood;
-        let required = definition
-            .cost
-            .get(wood.id())
-            .map_or(0, |amount| amount.max(0.0).round() as u32);
-        let Some(store) = (0..self.buildings.buildings.len()).find(|&i| {
-            let b = &self.buildings.buildings[i];
-            b.is_storage && b.outputs.allows(wood.id())
-        }) else {
-            self.build_status = Some("Construction needs a wood store: place a Wood Store.".into());
-            return;
+        let result = match construction_cost(definition) {
+            Some((material, required)) => self
+                .buildings
+                .request_construction(
+                    self.world.seed,
+                    self.world.terrain_edits(),
+                    &definition.id,
+                    footprint,
+                    rules,
+                    logistics,
+                    material,
+                    required,
+                )
+                .map(|_| {
+                    format!(
+                        "{} site placed: survivors will bring {} {}.",
+                        definition.name,
+                        required,
+                        material.id()
+                    )
+                }),
+            None => self
+                .buildings
+                .place_with_logistics(
+                    self.world.seed,
+                    self.world.terrain_edits(),
+                    &definition.id,
+                    footprint,
+                    rules,
+                    logistics,
+                )
+                .map(|_| format!("Placed {}.", definition.name)),
         };
-        match self.buildings.request_construction(
-            self.world.seed,
-            self.world.terrain_edits(),
-            &definition.id,
-            footprint,
-            rules,
-            logistics,
-            wood,
-            required,
-        ) {
-            Ok(site) => {
-                self.buildings.buildings[store]
-                    .outputs
-                    .insert_resource(wood.id(), required);
-                let mut status = format!("Construction of {} requested.", definition.name);
-                if let Some(worker) = self.world.selected_character() {
-                    self.jobs.add_job(worker, Job::Build { site, from: store });
-                } else {
-                    status.push_str(" Select a worker and add the build job.");
-                }
+        match result {
+            Ok(status) => {
                 self.build_status = Some(status);
                 self.build_mode = None;
-                self.construct_mode = false;
                 if let Some(ui) = &mut self.ui {
                     ui.set_selected_building(None);
                 }
@@ -183,10 +185,31 @@ impl App {
     }
 }
 
+/// The material and amount a building costs, or `None` if it is free.
+pub(super) fn construction_cost(definition: &content::BuildingDef) -> Option<(ResourceKind, u32)> {
+    definition.cost.iter().find_map(|(id, amount)| {
+        let required = amount.max(0.0).round() as u32;
+        let material = ResourceKind::from_id(id)?;
+        (required > 0).then_some((material, required))
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::toggle_selection;
-    use core_sim::Entity;
+    use super::{construction_cost, toggle_selection};
+    use core_sim::{Entity, ResourceKind};
+
+    #[test]
+    fn cost_map_becomes_a_material_and_amount() {
+        let mut def: content::BuildingDef =
+            ron::from_str("(id: \"x\", name: \"X\", width: 1, depth: 1)").unwrap();
+        assert_eq!(construction_cost(&def), None);
+        def.cost.insert("iron_ore".into(), 2.0);
+        assert_eq!(construction_cost(&def), Some((ResourceKind::IronOre, 2)));
+        def.cost.clear();
+        def.cost.insert("unknown".into(), 3.0);
+        assert_eq!(construction_cost(&def), None);
+    }
 
     #[test]
     fn toggle_adds_and_removes() {
