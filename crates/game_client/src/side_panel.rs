@@ -465,21 +465,25 @@ fn job_panel(
         let state = if site.completed.is_some() {
             "done".to_string()
         } else {
-            let waiting = site.delivered < site.required
-                && buildings
-                    .find_material_source(i, core_sim::BUILD_SOURCE_RADIUS)
-                    .is_none();
+            let remaining = site.required.saturating_sub(site.delivered);
+            let activity = if remaining > 0 {
+                "waiting for supply"
+            } else if site.worked {
+                "building"
+            } else if site.progress > 0.0 {
+                "construction paused"
+            } else if site.builder.is_some() {
+                "builder on the way"
+            } else {
+                "waiting for builder"
+            };
             format!(
-                "{}/{} {}, {:.0}% built{}",
+                "{}/{} {} delivered, {} remaining · {:.0}% built · {activity}",
                 site.delivered,
                 site.required,
                 site.material.id(),
-                100.0 * site.progress / core_sim::BUILD_SECONDS,
-                if waiting {
-                    format!(" (waiting for {} in stock nearby)", site.material.id())
-                } else {
-                    String::new()
-                }
+                remaining,
+                100.0 * site.progress / core_sim::BUILD_SECONDS
             )
         };
         ui.small(format!("Site #{i} {}: {state}", site.def));

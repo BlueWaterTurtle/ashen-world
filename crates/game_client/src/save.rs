@@ -648,6 +648,16 @@ mod tests {
         assert_eq!(buildings2.sites, buildings.sites);
         assert_eq!(buildings2.buildings, buildings.buildings);
         assert_eq!(
+            buildings2.sites[site].material,
+            core_sim::ResourceKind::Wood
+        );
+        assert_eq!(buildings2.sites[site].required, 15);
+        assert_eq!(
+            buildings2.sites[site].delivered,
+            buildings.sites[site].delivered
+        );
+        assert_eq!(buildings2.site_needs(site), buildings.site_needs(site));
+        assert_eq!(
             buildings2.sites[site].progress,
             buildings.sites[site].progress
         );
