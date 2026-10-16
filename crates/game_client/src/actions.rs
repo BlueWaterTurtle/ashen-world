@@ -1119,6 +1119,17 @@ mod tests {
             ..app.buildings.buildings[0].clone()
         });
         let blocked = app.placement_preview_at(x, z).unwrap();
+        let sim_result = app
+            .buildings
+            .validate(
+                app.world.seed,
+                app.world.terrain_edits(),
+                preview.footprint,
+                &PlacementRules::default(),
+            )
+            .err()
+            .map(|error| error.to_string());
+        assert_eq!(blocked.reason, sim_result);
         assert_eq!(
             blocked.reason.as_deref(),
             Some("overlaps another building or construction site")
@@ -1138,6 +1149,19 @@ mod tests {
         assert_eq!(app.buildings.sites[0].progress, 0.0);
         app.jobs.update(&mut app.world, &mut app.buildings);
         assert_eq!(app.jobs.auto_build_site(worker), Some(0));
+    }
+
+    #[test]
+    fn escape_dispatch_cancels_placement_before_quitting() {
+        let mut app = test_app();
+        app.dispatch_action(Action::SelectBuilding("house".into()));
+
+        app.dispatch_action(Action::Escape);
+        assert_eq!(app.build_mode, None);
+        assert!(!app.quit_requested);
+
+        app.dispatch_action(Action::Escape);
+        assert!(app.quit_requested);
     }
 
     #[test]
