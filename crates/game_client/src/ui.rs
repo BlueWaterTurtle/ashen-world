@@ -381,88 +381,88 @@ fn terrain_tool_panel(
     screen_height: f32,
     actions: &mut Vec<Action>,
 ) {
-    MovablePanel::new("Terrain Tool", "terrain_tool_panel", Pos2::new(12.0, 12.0)).show(
-        context,
-        visible,
-        |ui| {
-            state_line(
-                ui,
-                "Terrain editing:",
-                if editor.active { "On" } else { "Off" },
-                editor.active,
-            );
-            let context = ActionContext {
-                editor_active: editor.active,
-            };
-            let toggle = Action::ToggleTerrainEditor.descriptor();
-            let hotkey = toggle.hotkey.unwrap_or_default();
-            if ui
-                .button(if editor.active {
-                    format!("Stop editing ({hotkey})")
-                } else {
-                    format!("Start editing ({hotkey})")
-                })
-                .clicked()
-            {
-                actions.push(Action::ToggleTerrainEditor);
+    MovablePanel::new(
+        "Terrain Tool & Keys",
+        "terrain_tool_panel",
+        Pos2::new(12.0, 12.0),
+    )
+    .show(context, visible, |ui| {
+        state_line(
+            ui,
+            "Terrain editing:",
+            if editor.active { "On" } else { "Off" },
+            editor.active,
+        );
+        let context = ActionContext {
+            editor_active: editor.active,
+        };
+        let toggle = Action::ToggleTerrainEditor.descriptor();
+        let hotkey = toggle.hotkey.unwrap_or_default();
+        if ui
+            .button(if editor.active {
+                format!("Stop editing ({hotkey})")
+            } else {
+                format!("Start editing ({hotkey})")
+            })
+            .clicked()
+        {
+            actions.push(Action::ToggleTerrainEditor);
+        }
+        ui.horizontal_wrapped(|ui| {
+            for tool in Action::TERRAIN_TOOLS {
+                let action = Action::SetTerrainTool(tool);
+                let descriptor = action.descriptor();
+                let label = format!(
+                    "{} ({})",
+                    descriptor.label,
+                    descriptor.hotkey.unwrap_or_default()
+                );
+                if ui
+                    .add_enabled(
+                        action.is_available(&context),
+                        egui::SelectableLabel::new(editor.tool == tool, label),
+                    )
+                    .clicked()
+                {
+                    actions.push(action);
+                }
             }
-            ui.horizontal_wrapped(|ui| {
-                for tool in Action::TERRAIN_TOOLS {
-                    let action = Action::SetTerrainTool(tool);
-                    let descriptor = action.descriptor();
-                    let label = format!(
-                        "{} ({})",
-                        descriptor.label,
-                        descriptor.hotkey.unwrap_or_default()
-                    );
-                    if ui
-                        .add_enabled(
-                            action.is_available(&context),
-                            egui::SelectableLabel::new(editor.tool == tool, label),
-                        )
-                        .clicked()
-                    {
-                        actions.push(action);
+        });
+        status_line(
+            ui,
+            format!(
+                "Brush: {} m · Strength: {:.1} m",
+                editor.radius,
+                editor.strength_mm as f32 / 1000.0
+            ),
+        );
+        if editor.slope_start.is_some() {
+            status_line(ui, "Slope start set; click the end point.");
+        }
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .max_height((screen_height - 100.0).max(120.0))
+            .show(ui, |ui| {
+                let rows = crate::key_bindings::rows();
+                for group in ActionGroup::ALL {
+                    let mut group_rows = rows.iter().filter(|row| row.group == group).peekable();
+                    if group_rows.peek().is_none() {
+                        continue;
                     }
+                    section_header(ui, group.title());
+                    for row in group_rows {
+                        key_row(
+                            ui,
+                            &row.key,
+                            row.description,
+                            editor.active && row.terrain_relevant,
+                        );
+                    }
+                    ui.add_space(4.0);
                 }
             });
-            status_line(
-                ui,
-                format!(
-                    "Brush: {} m · Strength: {:.1} m",
-                    editor.radius,
-                    editor.strength_mm as f32 / 1000.0
-                ),
-            );
-            if editor.slope_start.is_some() {
-                status_line(ui, "Slope start set; click the end point.");
-            }
-            ui.separator();
-
-            egui::ScrollArea::vertical()
-                .max_height((screen_height - 100.0).max(120.0))
-                .show(ui, |ui| {
-                    let rows = crate::key_bindings::rows();
-                    for group in ActionGroup::ALL {
-                        let mut group_rows =
-                            rows.iter().filter(|row| row.group == group).peekable();
-                        if group_rows.peek().is_none() {
-                            continue;
-                        }
-                        section_header(ui, group.title());
-                        for row in group_rows {
-                            key_row(
-                                ui,
-                                &row.key,
-                                row.description,
-                                editor.active && row.terrain_relevant,
-                            );
-                        }
-                        ui.add_space(4.0);
-                    }
-                });
-        },
-    );
+    });
 }
 
 /// Applies the shared HUD theme: spacing, typography, rounded widgets and

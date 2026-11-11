@@ -1,6 +1,6 @@
 //! Rows for the keys panel. Keyboard rows are derived from the action descriptors so they
 //! cannot drift from the real bindings; only input that is not a discrete `Action` is listed
-//! here by hand.
+//! here by hand, along with compatibility aliases.
 
 use crate::actions::{ActionGroup, Availability, DESCRIPTORS};
 
@@ -77,6 +77,12 @@ const STATIC_ROWS: &[StaticRow] = &[
         key: "Mouse wheel",
         description: "Zoom camera",
         group: ActionGroup::Camera,
+        terrain_relevant: false,
+    },
+    StaticRow {
+        key: "H",
+        description: "Show or hide the terrain tool & keys panel",
+        group: ActionGroup::General,
         terrain_relevant: false,
     },
 ];

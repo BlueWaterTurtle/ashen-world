@@ -509,6 +509,9 @@ impl Action {
 /// Pure key-to-action mapping: the first available descriptor bound to `code` wins.
 /// Camera panning/orbiting and mouse input are handled directly in `input.rs`.
 pub(crate) fn key_action(code: KeyCode, context: &ActionContext, repeat: bool) -> Option<Action> {
+    if code == KeyCode::KeyH {
+        return (!repeat).then_some(Action::ToggleTerrainPanel);
+    }
     DESCRIPTORS
         .iter()
         .filter(|descriptor| descriptor.key == Some(code))
@@ -1232,6 +1235,7 @@ mod tests {
             (KeyCode::KeyT, Action::ToggleTerrainEditor),
             (KeyCode::F9, Action::QuickLoad),
             (KeyCode::F10, Action::ToggleTerrainPanel),
+            (KeyCode::KeyH, Action::ToggleTerrainPanel),
             (KeyCode::Escape, Action::Escape),
             (KeyCode::Digit1, Action::SelectSlot(0)),
             (KeyCode::Digit2, Action::SelectSlot(1)),
@@ -1248,6 +1252,7 @@ mod tests {
     #[test]
     fn keys_panel_toggle_ignores_key_repeat() {
         assert_eq!(key_action(KeyCode::F10, &IDLE, true), None);
+        assert_eq!(key_action(KeyCode::KeyH, &IDLE, true), None);
         assert_eq!(
             key_action(KeyCode::KeyR, &IDLE, true),
             Some(Action::RecruitNearest)
