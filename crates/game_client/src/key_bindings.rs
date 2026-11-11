@@ -1,100 +1,124 @@
-//! Table of every input binding shown by the terrain tool panel.
-//!
-//! This table lives next to the input handling but is not generated from it: when you add or
-//! change a binding in `input.rs` (`handle_key`, `handle_mouse_button`, `handle_mouse_wheel`),
-//! update `BINDINGS` together with it.
+//! Rows for the keys panel. Keyboard rows are derived from the action descriptors so they
+//! cannot drift from the real bindings; only input that is not a discrete `Action` is listed
+//! here by hand, along with compatibility aliases.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BindingGroup {
-    Terrain,
-    Camera,
-    Build,
-    SaveLoad,
-    General,
+use crate::actions::{ActionGroup, Availability, DESCRIPTORS};
+
+pub(crate) struct KeyRow {
+    pub(crate) key: String,
+    pub(crate) description: &'static str,
+    pub(crate) group: ActionGroup,
+    /// Highlighted while the terrain editor is active.
+    pub(crate) terrain_relevant: bool,
 }
 
-impl BindingGroup {
-    pub const ALL: [BindingGroup; 5] = [
-        BindingGroup::Terrain,
-        BindingGroup::Camera,
-        BindingGroup::Build,
-        BindingGroup::SaveLoad,
-        BindingGroup::General,
-    ];
-
-    pub fn title(self) -> &'static str {
-        match self {
-            BindingGroup::Terrain => "Terrain",
-            BindingGroup::Camera => "Camera",
-            BindingGroup::Build => "Build",
-            BindingGroup::SaveLoad => "Save / Load",
-            BindingGroup::General => "General",
-        }
-    }
+struct StaticRow {
+    key: &'static str,
+    description: &'static str,
+    group: ActionGroup,
+    terrain_relevant: bool,
 }
 
-pub struct Binding {
-    pub key: &'static str,
-    pub description: &'static str,
-    pub group: BindingGroup,
-}
-
-const fn b(key: &'static str, description: &'static str, group: BindingGroup) -> Binding {
-    Binding {
-        key,
-        description,
-        group,
-    }
-}
-
-/// Key that shows or hides the panel (handled in `input.rs`).
-pub const TOGGLE_PANEL_KEY: &str = "H";
-
-use BindingGroup::{Build, Camera, General, SaveLoad, Terrain};
-
-pub const BINDINGS: &[Binding] = &[
-    b("T", "Toggle terrain editor", Terrain),
-    b("F1", "Raise tool (editor active)", Terrain),
-    b("F2", "Lower tool (editor active)", Terrain),
-    b("F3", "Flatten tool (editor active)", Terrain),
-    b("F4", "Smooth tool (editor active)", Terrain),
-    b("F5 (editor)", "Slope tool (editor active)", Terrain),
-    b(
-        "[ / ]",
-        "Shrink / grow brush radius (editor active)",
-        Terrain,
-    ),
-    b(
-        "- / =",
-        "Lower / raise brush strength (editor active)",
-        Terrain,
-    ),
-    b(
-        "Left click (editor)",
-        "Apply the active terrain tool",
-        Terrain,
-    ),
-    b("W A S D / Arrows", "Pan camera", Camera),
-    b("Q / E", "Orbit camera left / right", Camera),
-    b("Right-drag / Middle-drag", "Orbit camera", Camera),
-    b("Mouse wheel", "Zoom camera", Camera),
-    b("Space", "Center camera on selected character", Camera),
-    b("Left click (placing)", "Place the selected building", Build),
-    b("Esc (placing)", "Cancel building placement", Build),
-    b("F5", "Quick-save", SaveLoad),
-    b("F9", "Quick-load", SaveLoad),
-    b("1 / 2 / 3", "Select player character 1 / 2 / 3", General),
-    b("R", "Recruit nearest recruitable character", General),
-    b("Left click", "Select / move selected squad", General),
-    b("Left-drag", "Box-select characters", General),
-    b("Right click", "Open context menu at the cursor", General),
-    b(TOGGLE_PANEL_KEY, "Show / hide this panel", General),
-    b(
-        "Esc",
-        "Close menu, exit editor or placement, then quit",
-        General,
-    ),
+// Static supplement: continuous camera input and mouse gestures. These are raw input handled
+// in `input.rs` (held keys, drags, wheel, clicks whose meaning depends on the target), not
+// discrete actions, so they have no descriptor. Keep in sync with `handle_key` and
+// `handle_mouse_button`.
+const STATIC_ROWS: &[StaticRow] = &[
+    StaticRow {
+        key: "Left mouse (editing)",
+        description: "Apply the selected terrain tool at the cursor",
+        group: ActionGroup::Terrain,
+        terrain_relevant: true,
+    },
+    StaticRow {
+        key: "Left mouse",
+        description:
+            "Place the selected building when placing; otherwise select, move, or drag-select",
+        group: ActionGroup::Build,
+        terrain_relevant: false,
+    },
+    StaticRow {
+        key: "A / ←",
+        description: "Pan camera left",
+        group: ActionGroup::Camera,
+        terrain_relevant: false,
+    },
+    StaticRow {
+        key: "D / →",
+        description: "Pan camera right",
+        group: ActionGroup::Camera,
+        terrain_relevant: false,
+    },
+    StaticRow {
+        key: "W / ↑",
+        description: "Pan camera forward",
+        group: ActionGroup::Camera,
+        terrain_relevant: false,
+    },
+    StaticRow {
+        key: "S / ↓",
+        description: "Pan camera back",
+        group: ActionGroup::Camera,
+        terrain_relevant: false,
+    },
+    StaticRow {
+        key: "Q / E",
+        description: "Orbit camera left / right",
+        group: ActionGroup::Camera,
+        terrain_relevant: false,
+    },
+    StaticRow {
+        key: "Right / middle mouse drag",
+        description: "Orbit camera",
+        group: ActionGroup::Camera,
+        terrain_relevant: false,
+    },
+    StaticRow {
+        key: "Mouse wheel",
+        description: "Zoom camera",
+        group: ActionGroup::Camera,
+        terrain_relevant: false,
+    },
+    StaticRow {
+        key: "H",
+        description: "Show or hide the terrain tool & keys panel",
+        group: ActionGroup::General,
+        terrain_relevant: false,
+    },
 ];
+
+/// All rows: one per hotkeyed action, then the static supplement. A hotkey shared by actions
+/// available in different contexts (F5) gets a context suffix so rows stay distinguishable.
+pub(crate) fn rows() -> Vec<KeyRow> {
+    let mut rows: Vec<KeyRow> = DESCRIPTORS
+        .iter()
+        .filter_map(|descriptor| {
+            let hotkey = descriptor.hotkey?;
+            let shared = DESCRIPTORS
+                .iter()
+                .filter(|other| other.hotkey == Some(hotkey))
+                .count()
+                > 1;
+            Some(KeyRow {
+                key: if shared {
+                    format!("{hotkey}{}", descriptor.availability.tag())
+                } else {
+                    hotkey.to_string()
+                },
+                description: descriptor.description,
+                group: descriptor.group,
+                terrain_relevant: descriptor.availability == Availability::EditorActive,
+            })
+        })
+        .collect();
+    rows.extend(STATIC_ROWS.iter().map(|row| KeyRow {
+        key: row.key.to_string(),
+        description: row.description,
+        group: row.group,
+        terrain_relevant: row.terrain_relevant,
+    }));
+    rows
+}
 
 #[cfg(test)]
 mod tests {
@@ -102,18 +126,33 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn bindings_are_unique_and_described() {
-        let mut seen = HashSet::new();
-        for binding in BINDINGS {
-            assert!(!binding.key.is_empty());
-            assert!(!binding.description.trim().is_empty());
-            assert!(seen.insert(binding.key), "duplicate key {}", binding.key);
+    fn rows_have_unique_keys_and_nonempty_text() {
+        let mut keys = HashSet::new();
+        for row in rows() {
+            assert!(keys.insert(row.key.clone()), "duplicate key: {}", row.key);
+            assert!(!row.key.trim().is_empty());
+            assert!(!row.description.trim().is_empty());
         }
     }
 
     #[test]
-    fn terrain_group_is_listed_first_and_toggle_is_present() {
-        assert_eq!(BINDINGS[0].group, BindingGroup::Terrain);
-        assert!(BINDINGS.iter().any(|b| b.key == TOGGLE_PANEL_KEY));
+    fn every_group_has_rows_and_a_title() {
+        let rows = rows();
+        for group in ActionGroup::ALL {
+            assert!(!group.title().is_empty());
+            assert!(rows.iter().any(|row| row.group == group));
+        }
+    }
+
+    #[test]
+    fn every_hotkeyed_action_is_listed() {
+        let rows = rows();
+        for descriptor in DESCRIPTORS {
+            if let Some(hotkey) = descriptor.hotkey {
+                assert!(rows.iter().any(|row| row.key.starts_with(hotkey)));
+            }
+        }
+        let f5: Vec<_> = rows.iter().filter(|r| r.key.starts_with("F5")).collect();
+        assert_eq!(f5.len(), 2);
     }
 }

@@ -1,15 +1,13 @@
 //! Keyboard and mouse handling: turns window events into camera, selection, build and
 //! terrain-editing changes on `App`.
 
-use core_sim::{BuildingLogistics, Footprint, PlacementRules};
-use glam::Vec3;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
+use crate::actions::key_action;
 use crate::context_menu::{self, ContextTarget};
 use crate::picking::select_players_in_rect;
-use crate::terrain_editor::TerrainTool;
 use crate::App;
 
 /// Squared cursor travel (in pixels) above which a left press becomes a drag selection
@@ -94,121 +92,27 @@ impl App {
         let PhysicalKey::Code(code) = event.physical_key else {
             return;
         };
-        match code {
-            KeyCode::Escape if down => self.handle_escape(event_loop),
-            KeyCode::KeyT if down => {
-                self.editor.active = !self.editor.active;
-                self.editor.slope_start = None;
-                if self.editor.active {
-                    self.build_mode = None;
-                    if let Some(ui) = &mut self.ui {
-                        ui.set_selected_building(None);
-                    }
-                    self.build_status = Some(self.editor.status());
-                } else {
-                    self.build_status = None;
+        if down {
+            if let Some(command) = key_action(code, &self.action_context(), event.repeat) {
+                self.dispatch_action(command);
+                if self.quit_requested {
+                    event_loop.exit();
                 }
+                return;
             }
-            KeyCode::F1 | KeyCode::F2 | KeyCode::F3 | KeyCode::F4 | KeyCode::F5
-                if down && self.editor.active =>
-            {
-                self.editor.set_tool(match code {
-                    KeyCode::F1 => TerrainTool::Raise,
-                    KeyCode::F2 => TerrainTool::Lower,
-                    KeyCode::F3 => TerrainTool::Flatten,
-                    KeyCode::F4 => TerrainTool::Smooth,
-                    _ => TerrainTool::Slope,
-                });
-                self.build_status = Some(self.editor.status());
+            if code == KeyCode::F10 {
+                return;
             }
-            KeyCode::F5 if down => self.quick_save(),
-            KeyCode::F9 if down => self.quick_load(),
-            KeyCode::BracketLeft | KeyCode::BracketRight if down && self.editor.active => {
-                let step = if code == KeyCode::BracketLeft { -1 } else { 1 };
-                self.editor.adjust_radius(step);
-                self.build_status = Some(self.editor.status());
-            }
-            KeyCode::Minus | KeyCode::Equal if down && self.editor.active => {
-                let step = if code == KeyCode::Minus { -250 } else { 250 };
-                self.editor.adjust_strength(step);
-                self.build_status = Some(self.editor.status());
-            }
+        }
+        // Held-state camera input stays here; it is continuous, not a discrete action.
+        match code {
             KeyCode::KeyA | KeyCode::ArrowLeft => self.input.left = down,
             KeyCode::KeyD | KeyCode::ArrowRight => self.input.right = down,
             KeyCode::KeyW | KeyCode::ArrowUp => self.input.forward = down,
             KeyCode::KeyS | KeyCode::ArrowDown => self.input.back = down,
             KeyCode::KeyQ if down => self.camera.orbit(-0.2, 0.0),
             KeyCode::KeyE if down => self.camera.orbit(0.2, 0.0),
-            KeyCode::Digit1 if down => self.select_player_slot(0),
-            KeyCode::Digit2 if down => self.select_player_slot(1),
-            KeyCode::Digit3 if down => self.select_player_slot(2),
-            KeyCode::Space if down => self.center_camera_on_selected(),
-            KeyCode::KeyR if down => self.recruit_nearest(),
-            KeyCode::KeyH if down => {
-                if let Some(ui) = &mut self.ui {
-                    ui.toggle_keys_panel();
-                }
-            }
             _ => {}
-        }
-    }
-
-    /// Escape peels back one layer: context menu, terrain editor, building placement, then quit.
-    fn handle_escape(&mut self, event_loop: &ActiveEventLoop) {
-        if self.ui.as_mut().is_some_and(|ui| ui.close_context_menu()) {
-            return;
-        }
-        if self.editor.active {
-            self.editor.active = false;
-            self.editor.slope_start = None;
-            self.build_status = None;
-        } else if self.build_mode.take().is_some() {
-            if let Some(ui) = &mut self.ui {
-                ui.set_selected_building(None);
-            }
-        } else {
-            event_loop.exit();
-        }
-    }
-
-    fn select_player_slot(&mut self, slot: usize) {
-        let player = self.world.player_characters().nth(slot);
-        if let Some(player) = player {
-            let _ = self.world.select_character(player);
-            self.selected_entities = vec![player];
-        }
-    }
-
-    fn center_camera_on_selected(&mut self) {
-        if let Some(selected) = self.world.selected_character() {
-            let p = self.world.position(selected);
-            self.camera.target = Vec3::new(
-                p.x,
-                self.world.terrain_edits().height(self.world.seed, p.x, p.z),
-                p.z,
-            );
-        }
-    }
-
-    fn recruit_nearest(&mut self) {
-        let Some(recruiter) = self.world.selected_character() else {
-            return;
-        };
-        let rp = self.world.position(recruiter);
-        let mut nearest: Option<(core_sim::Entity, f32)> = None;
-        for e in self.world.entities() {
-            if self.world.is_recruitable(e) {
-                let ep = self.world.position(e);
-                let dist_sq = (rp.x - ep.x).powi(2) + (rp.z - ep.z).powi(2);
-                if dist_sq <= core_sim::RECRUIT_MAX_DISTANCE.powi(2)
-                    && nearest.is_none_or(|(_, d)| dist_sq < d)
-                {
-                    nearest = Some((e, dist_sq));
-                }
-            }
-        }
-        if let Some((target, _)) = nearest {
-            let _ = self.world.recruit_with(recruiter, target);
         }
     }
 
@@ -338,39 +242,16 @@ impl App {
         }
 
         if let Some(definition_id) = self.build_mode.clone() {
-            let Some(definition) = self
+            if self
                 .building_defs
                 .iter()
-                .find(|definition| definition.id == definition_id)
-                .cloned()
-            else {
-                return;
-            };
-            let footprint = Footprint {
-                x: ground.x.floor() as i32 - definition.width / 2,
-                z: ground.z.floor() as i32 - definition.depth / 2,
-                width: definition.width,
-                depth: definition.depth,
-            };
-            let rules = PlacementRules {
-                requires_resource: definition.requires_resource.clone(),
-                minimum_resource_richness: definition.min_resource_richness,
-                minimum_fertility: definition.min_fertility,
-                building_margin: 0,
-            };
-            let logistics = BuildingLogistics {
-                worker_slots: definition.worker_slots,
-                input_slots: definition.input_slots,
-                output_slots: definition.output_slots,
-                stack_limit: definition.stack_limit,
-                input_resources: definition.input_resources.clone(),
-                output_resources: definition.output_resources.clone(),
-                is_storage: definition.storage,
-                is_mine: definition.mine,
-                is_smelter: definition.smelter,
-                required_inputs: definition.required_inputs.clone(),
-            };
-            self.place_building(&definition, footprint, &rules, logistics);
+                .any(|definition| definition.id == definition_id)
+            {
+                self.dispatch_action(crate::actions::Action::ConfirmBuilding {
+                    x: ground.x,
+                    z: ground.z,
+                });
+            }
             return;
         }
 

@@ -337,6 +337,7 @@ mod tests {
         assert_eq!(loaded.world, expected.world);
         assert_eq!(loaded.format_version, FORMAT_VERSION);
         assert_eq!(loaded.buildings.buildings.len(), 1);
+        assert!(loaded.buildings.sites.is_empty());
         assert_eq!(loaded.buildings.buildings[0].inputs.count_of("wood"), 4);
         assert_eq!(
             loaded.buildings.buildings[0]
@@ -413,6 +414,7 @@ mod tests {
         let loaded = read_save(path).unwrap();
         assert_eq!(loaded.format_version, FORMAT_VERSION);
         assert_eq!(loaded.buildings.buildings.len(), 1);
+        assert!(loaded.buildings.sites.is_empty());
         assert_eq!(loaded.buildings.buildings[0].inputs.count_of("wood"), 4);
         assert_eq!(loaded.jobs.jobs(Entity(0)), &[Job::Work { building: 0 }]);
     }
@@ -634,16 +636,31 @@ mod tests {
     #[test]
     fn in_progress_construction_survives_save_load_and_finishes_identically() {
         let (mut world, mut buildings, mut jobs, store, site) = construction_state();
-        for _ in 0..3 {
+        for _ in 0..4 {
             construction_step(&mut world, &mut buildings, &mut jobs, store, site);
         }
         assert!(buildings.sites[site].delivered > 0);
         assert!(buildings.sites[site].completed.is_none());
         assert_eq!(buildings.sites[site].builder, Some(Entity(0)));
+        assert!(buildings.sites[site].progress > 0.0);
 
         let (mut world2, mut buildings2, mut jobs2) = reload(&world, &buildings, &jobs);
         assert_eq!(buildings2.sites, buildings.sites);
         assert_eq!(buildings2.buildings, buildings.buildings);
+        assert_eq!(
+            buildings2.sites[site].material,
+            core_sim::ResourceKind::Wood
+        );
+        assert_eq!(buildings2.sites[site].required, 15);
+        assert_eq!(
+            buildings2.sites[site].delivered,
+            buildings.sites[site].delivered
+        );
+        assert_eq!(buildings2.site_needs(site), buildings.site_needs(site));
+        assert_eq!(
+            buildings2.sites[site].progress,
+            buildings.sites[site].progress
+        );
         assert_eq!(jobs2.jobs(Entity(0)), jobs.jobs(Entity(0)));
 
         for _ in 0..12 {
@@ -668,5 +685,47 @@ mod tests {
         assert!(buildings2.buildings[built].is_storage);
         assert_eq!(buildings2.buildings, buildings.buildings);
         assert!(jobs2.jobs(Entity(0)).is_empty());
+    }
+
+    #[test]
+    fn in_flight_auto_delivery_survives_save_load() {
+        let (mut world, mut buildings, _, store, site) = construction_state();
+        world.set_player_controlled(Entity(0), true);
+        let mut jobs = Jobs::default();
+        world.set_position(
+            Entity(0),
+            buildings.buildings[store].worker_slot_position(0),
+        );
+        world.tick = core_sim::JOB_CHECK_INTERVAL_TICKS;
+        jobs.update(&mut world, &mut buildings);
+        assert_eq!(jobs.auto_build_site(Entity(0)), Some(site));
+        let en_route = jobs.site_delivery_en_route(site);
+        assert!(en_route > 0);
+
+        let (mut world2, mut buildings2, mut jobs2) = reload(&world, &buildings, &jobs);
+        assert_eq!(jobs2.auto_build_site(Entity(0)), Some(site));
+        assert_eq!(jobs2.site_delivery_en_route(site), en_route);
+
+        for _ in 0..40 {
+            for (w, b, j) in [
+                (&mut world, &mut buildings, &mut jobs),
+                (&mut world2, &mut buildings2, &mut jobs2),
+            ] {
+                let carrying = w.inventory(Entity(0)).unwrap().count_of("wood") > 0;
+                let at = if carrying || b.site_needs(site) == 0 {
+                    b.sites[site].worker_position()
+                } else {
+                    b.buildings[store].worker_slot_position(0)
+                };
+                w.set_position(Entity(0), at);
+                w.tick = core_sim::JOB_CHECK_INTERVAL_TICKS
+                    * (w.tick / core_sim::JOB_CHECK_INTERVAL_TICKS + 1);
+                j.update(w, b);
+                b.tick_production(2.0);
+            }
+        }
+        assert!(buildings.sites[site].completed.is_some());
+        assert_eq!(buildings2.sites, buildings.sites);
+        assert_eq!(buildings2.buildings, buildings.buildings);
     }
 }

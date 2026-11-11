@@ -196,6 +196,16 @@ impl Jobs {
         self.workers.get(&worker)?.auto_build.map(|a| a.site)
     }
 
+    /// Material idle survivors have promised to bring to `site` and not yet delivered.
+    pub fn site_delivery_en_route(&self, site: usize) -> u32 {
+        self.workers
+            .values()
+            .filter_map(|w| w.auto_build)
+            .filter(|a| a.site == site)
+            .map(|a| a.claim)
+            .sum()
+    }
+
     pub fn is_suspended(&self, worker: Entity) -> bool {
         self.workers.get(&worker).is_some_and(|w| w.suspended)
     }
@@ -1178,6 +1188,41 @@ mod tests {
     }
 
     #[test]
+    fn construction_waits_for_missing_materials_before_progressing() {
+        let (mut world, mut buildings, mut jobs, w, store, site) = construction_setup();
+        assert_eq!(
+            buildings.buildings[store]
+                .outputs
+                .remove_resource("wood", 20),
+            20
+        );
+
+        build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
+        build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
+        assert_eq!(buildings.sites[site].delivered, 10);
+        assert_eq!(buildings.site_needs(site), 5);
+        assert_eq!(buildings.sites[site].progress, 0.0);
+        assert_eq!(buildings.sites[site].completed, None);
+
+        build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
+        assert_eq!(
+            jobs.job_status(w, 0, &buildings),
+            Some(JobStatus::Blocked(WorkStatus::MissingInput))
+        );
+        assert_eq!(buildings.sites[site].progress, 0.0);
+
+        buildings.buildings[store]
+            .outputs
+            .insert_resource("wood", 5);
+        for _ in 0..3 {
+            build_step(&mut world, &mut buildings, &mut jobs, w, store, site);
+        }
+        assert_eq!(buildings.sites[site].delivered, 15);
+        assert!(buildings.sites[site].progress > 0.0);
+        assert!(buildings.sites[site].completed.is_some());
+    }
+
+    #[test]
     fn site_is_reserved_by_one_worker() {
         let (world, mut buildings, mut jobs, w, store, site) = construction_setup();
         let mut world = world;
@@ -1310,6 +1355,22 @@ mod tests {
         assert_eq!(building.len(), 1);
         assert_eq!(ore_carried(&world, &workers), 1);
         assert_eq!(buildings.buildings[store].outputs.count_of("iron_ore"), 4);
+    }
+
+    #[test]
+    fn unmet_requirement_creates_and_keeps_a_delivery_claim() {
+        let (mut world, mut buildings, mut jobs, _workers, store, site) = auto_setup();
+        assert_eq!(jobs.site_delivery_en_route(site), 0);
+        auto_step(&mut world, &mut buildings, &mut jobs, store);
+        assert_eq!(buildings.site_needs(site), 1);
+        assert_eq!(jobs.site_delivery_en_route(site), 1);
+        auto_step(&mut world, &mut buildings, &mut jobs, store);
+        assert!(jobs.site_delivery_en_route(site) <= 1);
+        for _ in 0..40 {
+            auto_step(&mut world, &mut buildings, &mut jobs, store);
+        }
+        assert_eq!(buildings.site_needs(site), 0);
+        assert_eq!(jobs.site_delivery_en_route(site), 0);
     }
 
     #[test]

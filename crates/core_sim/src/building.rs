@@ -277,6 +277,21 @@ pub enum PlaceError {
     InsufficientFertility,
 }
 
+impl std::fmt::Display for PlaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooSteep => write!(f, "too steep"),
+            Self::Overlaps => write!(f, "overlaps another building or construction site"),
+            Self::InProtectedZone => write!(f, "inside a protected zone"),
+            Self::MissingResource(resource) => write!(f, "requires {resource} in the footprint"),
+            Self::InsufficientResourceRichness(resource) => {
+                write!(f, "insufficient {resource} richness")
+            }
+            Self::InsufficientFertility => write!(f, "insufficient soil fertility"),
+        }
+    }
+}
+
 /// What a building needs to be placed; filled from content by the caller.
 #[derive(Debug, Clone, Default)]
 pub struct PlacementRules {
@@ -368,6 +383,9 @@ impl Buildings {
             .buildings
             .iter()
             .any(|b| b.footprint.overlaps(&fp, rules.building_margin))
+            || self.sites.iter().any(|site| {
+                site.completed.is_none() && site.footprint.overlaps(&fp, rules.building_margin)
+            })
         {
             return Err(PlaceError::Overlaps);
         }
@@ -458,13 +476,6 @@ impl Buildings {
         required: u32,
     ) -> Result<usize, PlaceError> {
         self.validate(seed, edits, fp, rules)?;
-        if self
-            .sites
-            .iter()
-            .any(|s| s.completed.is_none() && s.footprint.overlaps(&fp, rules.building_margin))
-        {
-            return Err(PlaceError::Overlaps);
-        }
         self.sites.push(ConstructionSite {
             def: def.to_string(),
             footprint: fp,
@@ -1063,6 +1074,34 @@ mod tests {
             Err(PlaceError::InsufficientFertility)
         );
         assert!(b.blocks((1, 1)) && !b.blocks((5, 5)));
+    }
+
+    #[test]
+    fn unfinished_construction_sites_block_new_placements() {
+        let mut buildings = Buildings::default();
+        let footprint = fp(0, 0, 2, 2);
+        buildings
+            .request_construction(
+                1,
+                &TerrainEdits::default(),
+                "house",
+                footprint,
+                &PlacementRules::default(),
+                BuildingLogistics::default(),
+                ResourceKind::Wood,
+                1,
+            )
+            .unwrap();
+
+        assert_eq!(
+            buildings.validate(
+                1,
+                &TerrainEdits::default(),
+                footprint,
+                &PlacementRules::default(),
+            ),
+            Err(PlaceError::Overlaps)
+        );
     }
 
     #[test]

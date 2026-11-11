@@ -6,6 +6,7 @@ mod context_menu;
 mod input;
 mod key_bindings;
 mod mesh;
+mod panel;
 mod picking;
 mod renderer;
 mod save;
@@ -61,6 +62,8 @@ struct App {
     ui: Option<GameUi>,
     agent_instances: Vec<AgentInstance>,
     save_metadata: SaveMetadata,
+    /// Set by `Action::Escape` when nothing is left to cancel; the event loop then exits.
+    quit_requested: bool,
 }
 
 impl App {
@@ -102,6 +105,7 @@ impl App {
             ui: None,
             agent_instances: Vec::new(),
             save_metadata,
+            quit_requested: false,
         }
     }
 
@@ -170,6 +174,7 @@ impl App {
 
     /// Run the HUD and apply any actions the player triggered through it.
     fn run_hud(&mut self) {
+        let placement_preview = self.placement_preview();
         let actions = match (&self.window, &mut self.ui) {
             (Some(window), Some(ui)) => ui.run(
                 window,
@@ -183,14 +188,14 @@ impl App {
                     seed: self.world.seed,
                     camera: &self.camera,
                     selection_rect: self.input.selection_rect,
-                    editor: &self.editor,
-                    placing: self.build_mode.is_some(),
+                    terrain_editor: &self.editor,
+                    placement_preview: placement_preview.as_ref(),
                 },
             ),
             _ => Vec::new(),
         };
         for action in actions {
-            self.apply_ui_action(action);
+            self.dispatch_action(action);
         }
     }
 

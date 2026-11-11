@@ -1,9 +1,12 @@
 //! Maps a right-clicked world target plus the selected worker to the actions the
 //! context menu offers. Pure data: the UI renders entries and `main` executes the actions.
+//!
+//! Availability here is a UX hint only: the simulation (`Jobs`, `Buildings`) remains the
+//! authority and re-validates every job when it runs.
 
 use core_sim::{Buildings, Entity, Job, Jobs, ResourceKind};
 
-use crate::ui::UiAction;
+use crate::actions::Action;
 
 /// What the player right-clicked in the world.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -17,13 +20,29 @@ pub enum ContextTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextEntry {
     pub label: String,
-    pub action: Option<UiAction>,
+    pub action: Option<Action>,
+    /// Hotkey shown next to the label when the action has a keyboard equivalent.
+    pub hotkey: Option<&'static str>,
 }
 
-fn entry(label: impl Into<String>, action: UiAction) -> ContextEntry {
+// Fixed rows take their labels from the action descriptors; dynamic rows are built in
+// `available_actions`. "Close" only dismisses the menu, so it has no action of its own.
+const LABEL_CLOSE: &str = "Close";
+
+fn entry(label: impl Into<String>, action: Action) -> ContextEntry {
     ContextEntry {
         label: label.into(),
         action: Some(action),
+        hotkey: None,
+    }
+}
+
+fn entry_for(action: Action) -> ContextEntry {
+    let descriptor = action.descriptor();
+    ContextEntry {
+        label: descriptor.label.to_string(),
+        action: Some(action),
+        hotkey: descriptor.hotkey,
     }
 }
 
@@ -81,7 +100,7 @@ pub fn available_actions(
                 };
                 entries.push(entry(
                     verb,
-                    UiAction::AddJob {
+                    Action::AddJob {
                         worker,
                         building: index,
                     },
@@ -100,7 +119,7 @@ pub fn available_actions(
                     {
                         entries.push(entry(
                             format!("Haul iron ore to {}", building_name(buildings, defs, to)),
-                            UiAction::AddHaul {
+                            Action::AddHaul {
                                 worker,
                                 from: index,
                                 to,
@@ -125,7 +144,7 @@ pub fn available_actions(
                                 "Haul iron ore from {}",
                                 building_name(buildings, defs, from)
                             ),
-                            UiAction::AddHaul {
+                            Action::AddHaul {
                                 worker,
                                 from,
                                 to: index,
@@ -141,7 +160,7 @@ pub fn available_actions(
                 {
                     entries.push(entry(
                         format!("Build {} site #{site}", s.def),
-                        UiAction::AddBuild {
+                        Action::AddBuild {
                             worker,
                             site,
                             from: index,
@@ -149,7 +168,7 @@ pub fn available_actions(
                     ));
                 }
             }
-            entries.push(entry("Inspect", UiAction::InspectBuilding(index)));
+            entries.push(entry_for(Action::InspectBuilding(index)));
         }
         ContextTarget::Site(site) => {
             if let Some(s) = buildings.sites.get(site).filter(|s| s.completed.is_none()) {
@@ -159,14 +178,20 @@ pub fn available_actions(
                     {
                         entries.push(entry(
                             format!("Build from {}", building_name(buildings, defs, from)),
-                            UiAction::AddBuild { worker, site, from },
+                            Action::AddBuild { worker, site, from },
                         ));
                     }
                 }
             }
         }
         ContextTarget::Ground { x, z } => {
-            entries.push(entry("Move here", UiAction::MoveSelected { x, z }));
+            entries.push(entry_for(Action::MoveSelected { x, z }));
+            for definition in defs {
+                entries.push(entry(
+                    format!("Place {}", definition.name),
+                    Action::SelectBuilding(definition.id.clone()),
+                ));
+            }
         }
     }
     entries.push(close_entry());
@@ -175,8 +200,9 @@ pub fn available_actions(
 
 fn close_entry() -> ContextEntry {
     ContextEntry {
-        label: "Close".to_string(),
+        label: LABEL_CLOSE.to_string(),
         action: None,
+        hotkey: Action::Escape.descriptor().hotkey,
     }
 }
 
@@ -266,6 +292,37 @@ mod tests {
     }
 
     #[test]
+    fn entries_have_labels_and_no_duplicate_actions() {
+        let mut buildings = Buildings::default();
+        buildings
+            .buildings
+            .push(building("iron_mine", 1, true, true, false));
+        buildings
+            .buildings
+            .push(building("ore_storage", 0, false, true, true));
+        for target in [
+            ContextTarget::Building(0),
+            ContextTarget::Building(1),
+            ContextTarget::Building(9),
+            ContextTarget::Site(0),
+            ContextTarget::Ground { x: 0.0, z: 0.0 },
+        ] {
+            let entries = available_actions(target, Entity(0), &Jobs::default(), &buildings, &[]);
+            assert_eq!(entries.last().unwrap().action, None);
+            assert_eq!(entries.last().unwrap().hotkey, Some("Esc"));
+            for (i, e) in entries.iter().enumerate() {
+                assert!(!e.label.trim().is_empty());
+                assert!(entries[..i].iter().all(|o| o.label != e.label));
+                if let Some(action) = &e.action {
+                    assert!(entries[..i]
+                        .iter()
+                        .all(|o| o.action.as_ref() != Some(action)));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn ground_offers_move_and_close() {
         let entries = available_actions(
             ContextTarget::Ground { x: 1.0, z: 2.0 },
@@ -277,7 +334,44 @@ mod tests {
         assert_eq!(labels(&entries), ["Move here", "Close"]);
         assert_eq!(
             entries[0].action,
-            Some(UiAction::MoveSelected { x: 1.0, z: 2.0 })
+            Some(Action::MoveSelected { x: 1.0, z: 2.0 })
         );
+    }
+
+    #[test]
+    fn ground_building_entry_uses_select_building_action() {
+        let definition = content::BuildingDef {
+            id: "house".into(),
+            name: "House".into(),
+            width: 2,
+            depth: 2,
+            requires_resource: None,
+            min_resource_richness: None,
+            min_fertility: None,
+            worker_slots: 0,
+            input_slots: 0,
+            output_slots: 0,
+            stack_limit: 100,
+            input_resources: Vec::new(),
+            required_inputs: Vec::new(),
+            output_resources: Vec::new(),
+            storage: false,
+            mine: false,
+            smelter: false,
+            dwelling: true,
+            cost: Default::default(),
+            crop: None,
+        };
+        let entries = available_actions(
+            ContextTarget::Ground { x: 1.0, z: 2.0 },
+            Entity(0),
+            &Jobs::default(),
+            &Buildings::default(),
+            &[definition],
+        );
+        assert!(entries.iter().any(|entry| {
+            entry.label == "Place House"
+                && entry.action == Some(Action::SelectBuilding("house".into()))
+        }));
     }
 }

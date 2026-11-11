@@ -1,53 +1,15 @@
+use crate::actions::{Action, ActionContext, ActionGroup, PlacementPreview};
 use crate::context_menu::ContextEntry;
+use crate::panel::{
+    key_row, panel_frame, popover_frame, section_header, state_line, status_line, MovablePanel,
+    ACCENT, DIVIDER, PANEL_FILL,
+};
 use core_sim::{fertility_at, resource_richness_at, Buildings, Entity, Jobs, World};
 use egui::{ClippedPrimitive, Color32, Id, LayerId, Order, Pos2, Stroke, TexturesDelta};
 use glam::{Mat4, Vec3};
 use std::sync::Arc;
 use winit::event::WindowEvent;
 use winit::window::Window;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum UiAction {
-    Select(Entity),
-    /// Add or remove a survivor from the current selection (ctrl/shift-click).
-    ToggleSelect(Entity),
-    Recruit(Entity),
-    SelectBuilding(String),
-    CancelBuilding,
-    AddJob {
-        worker: Entity,
-        building: usize,
-    },
-    AddBuild {
-        worker: Entity,
-        site: usize,
-        from: usize,
-    },
-    AddHaul {
-        worker: Entity,
-        from: usize,
-        to: usize,
-    },
-    RemoveJob {
-        worker: Entity,
-        index: usize,
-    },
-    MoveJobUp {
-        worker: Entity,
-        index: usize,
-    },
-    MoveJobDown {
-        worker: Entity,
-        index: usize,
-    },
-    ResumeJobs(Entity),
-    /// Move the selected squad so its anchor stands at this ground point.
-    MoveSelected {
-        x: f32,
-        z: f32,
-    },
-    InspectBuilding(usize),
-}
 
 /// An open right-click menu: physical-pixel cursor position plus its entries.
 struct OpenContextMenu {
@@ -68,8 +30,8 @@ pub struct HudData<'a> {
     pub seed: u64,
     pub camera: &'a crate::camera::Camera,
     pub selection_rect: Option<[f32; 4]>,
-    pub editor: &'a crate::terrain_editor::TerrainEditor,
-    pub placing: bool,
+    pub terrain_editor: &'a crate::terrain_editor::TerrainEditor,
+    pub placement_preview: Option<&'a PlacementPreview>,
 }
 
 pub struct GameUi {
@@ -80,7 +42,7 @@ pub struct GameUi {
     textures_delta: TexturesDelta,
     selected_building: Option<String>,
     context_menu: Option<OpenContextMenu>,
-    keys_panel_visible: bool,
+    terrain_panel_visible: bool,
 }
 
 impl GameUi {
@@ -104,7 +66,7 @@ impl GameUi {
             textures_delta: TexturesDelta::default(),
             selected_building: None,
             context_menu: None,
-            keys_panel_visible: true,
+            terrain_panel_visible: true,
         }
     }
 
@@ -122,10 +84,6 @@ impl GameUi {
         });
     }
 
-    pub fn toggle_keys_panel(&mut self) {
-        self.keys_panel_visible = !self.keys_panel_visible;
-    }
-
     /// Closes the context menu; returns whether one was open.
     pub fn close_context_menu(&mut self) -> bool {
         self.context_menu.take().is_some()
@@ -135,7 +93,7 @@ impl GameUi {
         self.state.on_window_event(window, event).consumed
     }
 
-    pub fn run(&mut self, window: &Window, data: HudData<'_>) -> Vec<UiAction> {
+    pub fn run(&mut self, window: &Window, data: HudData<'_>) -> Vec<Action> {
         let HudData {
             world,
             selected_entities,
@@ -146,14 +104,14 @@ impl GameUi {
             seed,
             camera,
             selection_rect,
-            editor,
-            placing,
+            terrain_editor,
+            placement_preview,
         } = data;
         let input = self.state.take_egui_input(window);
         let mut actions = Vec::new();
         let selected_building = &mut self.selected_building;
         let context_menu = &mut self.context_menu;
-        let keys_panel_visible = &mut self.keys_panel_visible;
+        let terrain_panel_visible = &mut self.terrain_panel_visible;
         let output = self.context.run(input, |ctx| {
             let size = window.inner_size();
             let scale = window.scale_factor() as f32;
@@ -248,6 +206,45 @@ impl GameUi {
                 }
             }
 
+            if let Some(preview) = placement_preview {
+                let fp = preview.footprint;
+                let corners = [
+                    (fp.x, fp.z),
+                    (fp.x + fp.width, fp.z),
+                    (fp.x + fp.width, fp.z + fp.depth),
+                    (fp.x, fp.z + fp.depth),
+                ];
+                let points: Option<Vec<Pos2>> = corners
+                    .into_iter()
+                    .map(|(x, z)| {
+                        let position = Vec3::new(
+                            x as f32,
+                            world.terrain_edits().height(seed, x as f32, z as f32) + 0.4,
+                            z as f32,
+                        );
+                        project_to_screen(view_proj, position, screen_width, screen_height)
+                    })
+                    .collect();
+                if let Some(points) = points {
+                    let (fill, stroke) = if preview.reason.is_some() {
+                        (
+                            Color32::from_rgba_unmultiplied(210, 55, 50, 70),
+                            Color32::from_rgb(245, 90, 80),
+                        )
+                    } else {
+                        (
+                            Color32::from_rgba_unmultiplied(55, 200, 105, 70),
+                            Color32::from_rgb(95, 245, 145),
+                        )
+                    };
+                    painter.add(egui::Shape::convex_polygon(
+                        points,
+                        fill,
+                        Stroke::new(2.0_f32, stroke),
+                    ));
+                }
+            }
+
             egui::SidePanel::right("game_hud")
                 .frame(panel_frame())
                 .default_width(270.0)
@@ -265,23 +262,18 @@ impl GameUi {
                             build_status,
                             selected_building: &mut *selected_building,
                             actions: &mut actions,
+                            placement_preview,
                         },
                     );
                 });
 
-            if *keys_panel_visible {
-                let mut open = true;
-                egui::Window::new("Terrain Tool & Keys")
-                    .id(Id::new("terrain_keys_panel"))
-                    .frame(panel_frame())
-                    .default_pos(Pos2::new(12.0, 12.0))
-                    .constrain(true)
-                    .collapsible(true)
-                    .resizable(false)
-                    .open(&mut open)
-                    .show(ctx, |ui| keys_panel(ui, editor, placing));
-                *keys_panel_visible = open;
-            }
+            terrain_tool_panel(
+                ctx,
+                terrain_panel_visible,
+                terrain_editor,
+                screen_height,
+                &mut actions,
+            );
 
             if let Some(menu) = context_menu.as_mut() {
                 let mut close = false;
@@ -292,10 +284,14 @@ impl GameUi {
                     .show(ctx, |ui| {
                         popover_frame().show(ui, |ui| {
                             ui.set_min_width(170.0);
-                            ui.label(egui::RichText::new(&menu.title).strong().color(ACCENT));
+                            section_header(ui, &menu.title);
                             ui.separator();
                             for entry in &menu.entries {
-                                if ui.selectable_label(false, &entry.label).clicked() {
+                                let text = match entry.hotkey {
+                                    Some(key) => format!("{}  [{key}]", entry.label),
+                                    None => entry.label.clone(),
+                                };
+                                if ui.selectable_label(false, text).clicked() {
                                     if let Some(action) = &entry.action {
                                         actions.push(action.clone());
                                     }
@@ -327,6 +323,10 @@ impl GameUi {
 
     pub fn set_selected_building(&mut self, id: Option<String>) {
         self.selected_building = id;
+    }
+
+    pub fn toggle_terrain_panel(&mut self) {
+        self.terrain_panel_visible = !self.terrain_panel_visible;
     }
 
     pub fn paint(
@@ -374,78 +374,95 @@ impl GameUi {
     }
 }
 
-const PANEL_FILL: Color32 = Color32::from_rgba_premultiplied(22, 24, 28, 235);
-const ACCENT: Color32 = Color32::from_rgb(225, 190, 120);
-const DIVIDER: Color32 = Color32::from_rgb(62, 66, 74);
-
-/// Dark, framed panel style with an amber accent line on the inner edge.
-fn keys_panel(ui: &mut egui::Ui, editor: &crate::terrain_editor::TerrainEditor, placing: bool) {
-    use crate::key_bindings::{BindingGroup, BINDINGS};
-    if editor.active {
-        ui.label(
-            egui::RichText::new("Terrain editor: ON")
-                .strong()
-                .color(ACCENT),
+fn terrain_tool_panel(
+    context: &egui::Context,
+    visible: &mut bool,
+    editor: &crate::terrain_editor::TerrainEditor,
+    screen_height: f32,
+    actions: &mut Vec<Action>,
+) {
+    MovablePanel::new(
+        "Terrain Tool & Keys",
+        "terrain_tool_panel",
+        Pos2::new(12.0, 12.0),
+    )
+    .show(context, visible, |ui| {
+        state_line(
+            ui,
+            "Terrain editing:",
+            if editor.active { "On" } else { "Off" },
+            editor.active,
         );
-        ui.label(editor.status());
-    } else {
-        ui.label("Terrain editor: off (press T)");
-    }
-    for group in BindingGroup::ALL {
+        let context = ActionContext {
+            editor_active: editor.active,
+        };
+        let toggle = Action::ToggleTerrainEditor.descriptor();
+        let hotkey = toggle.hotkey.unwrap_or_default();
+        if ui
+            .button(if editor.active {
+                format!("Stop editing ({hotkey})")
+            } else {
+                format!("Start editing ({hotkey})")
+            })
+            .clicked()
+        {
+            actions.push(Action::ToggleTerrainEditor);
+        }
+        ui.horizontal_wrapped(|ui| {
+            for tool in Action::TERRAIN_TOOLS {
+                let action = Action::SetTerrainTool(tool);
+                let descriptor = action.descriptor();
+                let label = format!(
+                    "{} ({})",
+                    descriptor.label,
+                    descriptor.hotkey.unwrap_or_default()
+                );
+                if ui
+                    .add_enabled(
+                        action.is_available(&context),
+                        egui::SelectableLabel::new(editor.tool == tool, label),
+                    )
+                    .clicked()
+                {
+                    actions.push(action);
+                }
+            }
+        });
+        status_line(
+            ui,
+            format!(
+                "Brush: {} m · Strength: {:.1} m",
+                editor.radius,
+                editor.strength_mm as f32 / 1000.0
+            ),
+        );
+        if editor.slope_start.is_some() {
+            status_line(ui, "Slope start set; click the end point.");
+        }
         ui.separator();
-        ui.label(egui::RichText::new(group.title()).strong());
-        egui::Grid::new(("key_group", group.title()))
-            .num_columns(2)
+
+        egui::ScrollArea::vertical()
+            .max_height((screen_height - 100.0).max(120.0))
             .show(ui, |ui| {
-                for binding in BINDINGS.iter().filter(|b| b.group == group) {
-                    let relevant = match group {
-                        BindingGroup::Terrain => editor.active,
-                        BindingGroup::Build => placing,
-                        _ => false,
-                    };
-                    let (key, text) = (
-                        egui::RichText::new(binding.key).monospace(),
-                        egui::RichText::new(binding.description),
-                    );
-                    if relevant {
-                        ui.label(key.strong().color(ACCENT));
-                        ui.label(text.color(ACCENT));
-                    } else {
-                        ui.label(key);
-                        ui.label(text);
+                let rows = crate::key_bindings::rows();
+                for group in ActionGroup::ALL {
+                    let mut group_rows = rows.iter().filter(|row| row.group == group).peekable();
+                    if group_rows.peek().is_none() {
+                        continue;
                     }
-                    ui.end_row();
+                    section_header(ui, group.title());
+                    for row in group_rows {
+                        key_row(
+                            ui,
+                            &row.key,
+                            row.description,
+                            editor.active && row.terrain_relevant,
+                        );
+                    }
+                    ui.add_space(4.0);
                 }
             });
-    }
-}
-
-fn panel_frame() -> egui::Frame {
-    egui::Frame::none()
-        .fill(PANEL_FILL)
-        .stroke(Stroke::new(1.0_f32, ACCENT))
-        .inner_margin(egui::Margin::same(12.0))
-        .shadow(egui::epaint::Shadow {
-            offset: egui::vec2(-2.0, 0.0),
-            blur: 12.0,
-            spread: 0.0,
-            color: Color32::from_black_alpha(120),
-        })
-}
-
-/// Small rounded popover used by the right-click context menu.
-fn popover_frame() -> egui::Frame {
-    egui::Frame::none()
-        .fill(PANEL_FILL)
-        .stroke(Stroke::new(1.0_f32, ACCENT))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::same(8.0))
-        .shadow(egui::epaint::Shadow {
-            offset: egui::vec2(2.0, 3.0),
-            blur: 10.0,
-            spread: 0.0,
-            color: Color32::from_black_alpha(120),
-        })
+    });
 }
 
 /// Applies the shared HUD theme: spacing, typography, rounded widgets and
